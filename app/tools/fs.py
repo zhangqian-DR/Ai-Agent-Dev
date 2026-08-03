@@ -44,6 +44,20 @@ def read_file(work_dir: Path, path: str, max_bytes: int = 1_000_000,
     return text
 
 import os, difflib
+from datetime import datetime
+
+def _backup_path(p: Path) -> Path:
+    """逐代备份：`a.txt` → `a.txt.20260803-2231.bak`。
+    固定叫 `a.txt.bak` 的话每次写入都覆盖上一代，agent 连改同一文件两次
+    最原始的内容就永久丢失了。同秒内多次写入用 -1/-2 递增避让。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = p.with_name(f"{p.name}.{stamp}.bak")
+    n = 1
+    while bak.exists():
+        bak = p.with_name(f"{p.name}.{stamp}-{n}.bak")
+        n += 1
+    return bak
 
 def preview_write(work_dir: Path, path: str, content: str) -> str:
     p = resolve_in_sandbox(work_dir, path)
@@ -61,8 +75,7 @@ def write_file(work_dir: Path, path: str, content: str, max_chars: int = 64_000)
         return f"内容过长（{len(content)} 字符，上限 {max_chars}），已拒绝写入，请分块写：{path}"
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.is_file():
-        bak = p.with_suffix(p.suffix + ".bak")
-        bak.write_bytes(p.read_bytes())
+        _backup_path(p).write_bytes(p.read_bytes())
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, p)   # 原子替换

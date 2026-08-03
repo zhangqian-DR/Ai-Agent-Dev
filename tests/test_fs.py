@@ -61,16 +61,29 @@ def test_preview_write_shows_diff(tmp_path):
     d = preview_write(tmp_path, "a.txt", "new\n")
     assert "-old" in d and "+new" in d
 
+def _baks(tmp_path, name):
+    return sorted(p.read_text(encoding="utf-8") for p in tmp_path.glob(f"{name}.*.bak"))
+
 def test_write_file_atomic_and_backup(tmp_path):
     f = tmp_path / "a.txt"; f.write_text("old\n", encoding="utf-8")
     write_file(tmp_path, "a.txt", "new\n")
     assert f.read_text(encoding="utf-8") == "new\n"
-    assert (tmp_path / "a.txt.bak").read_text(encoding="utf-8") == "old\n"
+    assert _baks(tmp_path, "a.txt") == ["old\n"]      # 原文件被备份
 
 def test_write_new_file_no_backup(tmp_path):
     write_file(tmp_path, "n.txt", "hi")
     assert (tmp_path / "n.txt").read_text(encoding="utf-8") == "hi"
-    assert not (tmp_path / "n.txt.bak").exists()
+    assert _baks(tmp_path, "n.txt") == []
+
+def test_backup_keeps_every_generation(tmp_path):
+    """备份必须逐代保留。只留一代的话，agent 连改同一文件两次，
+    最原始的内容就永久丢失了，与「改坏可恢复」的意图相悖。"""
+    f = tmp_path / "a.txt"; f.write_text("v1\n", encoding="utf-8")
+    write_file(tmp_path, "a.txt", "v2\n")
+    write_file(tmp_path, "a.txt", "v3\n")
+
+    assert f.read_text(encoding="utf-8") == "v3\n"
+    assert _baks(tmp_path, "a.txt") == ["v1\n", "v2\n"], "最初的 v1 必须还能找回来"
 
 def test_write_leaves_no_tmp_file(tmp_path):
     write_file(tmp_path, "a.txt", "hi")
