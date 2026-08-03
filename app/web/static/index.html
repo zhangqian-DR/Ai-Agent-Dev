@@ -250,10 +250,10 @@ function handle(e){
   }else if(e.type==='plan'){
     // 进度用模型自报的 current，不再数工具调用次数——计划的步骤粒度和
     // 工具调用粒度天然对不上（一步「编写并保存」实际只有一次 write_file）
-    var first=!lastPlan.length;
-    lastPlan=e.steps||[];planDone=Math.max(0,(e.current||1)-1);
+    var steps=e.steps||[],changed=!samePlan(steps,lastPlan);
+    lastPlan=steps;planDone=Math.max(0,(e.current||1)-1);
     renderPlan(lastPlan,planDone);
-    if(first)planCard(lastPlan);      // 只在计划首次出现时画卡片，推进时不刷屏
+    if(changed)planCard(lastPlan);    // 只在清单本身变了时画卡片，推进时不刷屏
   }else if(e.type==='tool'){
     var rejected=(e.result||'').indexOf('用户拒绝')===0;
     toolCard(e.name,e.result,rejected?'已拒绝':'自动放行',rejected?'skip':'');
@@ -281,6 +281,17 @@ function planCard(steps){
   toolCard('update_plan',(steps||[]).map(function(s,i){return (i+1)+'. '+s;}).join('\n'),'自动放行');
 }
 
+// 计划卡片画不画，看的是 steps 有没有真的变。
+// 模型每推进一步都会带着同一份 steps 重调一次 update_plan，不挡的话聊天流会被
+// 同一份清单刷屏；而只看"面板空不空"又会漏掉中途整份换掉计划的情况——
+// registry 那边是 self.plan = list(args["steps"])，整份替换，面板会悄悄变成新的，
+// 聊天流里却一点痕迹都没有，看起来就是面板和上面那张卡对不上。
+function samePlan(a,b){
+  if(a.length!==b.length)return false;
+  for(var i=0;i<a.length;i++){if(a[i]!==b[i])return false;}
+  return true;
+}
+
 // 回放上一次会话：关掉页面再打开，聊天记录还在
 function restore(){
   return fetch('/history').then(function(r){return r.json();}).then(function(h){
@@ -289,7 +300,14 @@ function restore(){
     ms.forEach(function(m){
       if(m.role==='user')msg('user','你',m.content);
       else if(m.role==='assistant')msg('think','🤖',m.content);
-      else if(m.role==='final')msg((m.content||'').indexOf('出错：')===0?'err':'final','✅',m.content);
+      else if(m.role==='final'){
+        var bad=(m.content||'').indexOf('出错：')===0;
+        msg(bad?'err':'final',bad?'✖':'✅',m.content);   // 图标也要跟着判，别红框配 ✅
+        // 和实时路径一样把所有步骤划成完成。不补这一句的话，回放一个已经跑完的
+        // 会话，面板会停在最后一次自报的 current 上，看着像没跑完。
+        // 没有计划时不写"本次无需计划"——页面刚打开，占位的"等待任务"才是实话。
+        if(lastPlan.length)renderPlan(lastPlan,lastPlan.length);
+      }
       else if(m.role==='tool')toolCard(m.tool||'tool',m.content,
         (m.content||'').indexOf('用户拒绝')===0?'已拒绝':'自动放行',
         (m.content||'').indexOf('用户拒绝')===0?'skip':'');
@@ -297,10 +315,10 @@ function restore(){
         try{
           var v=JSON.parse(m.content);
           var st=Array.isArray(v)?v:(v.steps||[]);        // 兼容早期只存数组的记录
-          var first=!lastPlan.length;
+          var changed=!samePlan(st,lastPlan);
           lastPlan=st;planDone=Array.isArray(v)?st.length:Math.max(0,(v.current||1)-1);
           renderPlan(st,planDone);
-          if(first)planCard(st);
+          if(changed)planCard(st);
         }catch(e){}
       }
     });
