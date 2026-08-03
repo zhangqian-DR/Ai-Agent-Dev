@@ -18,8 +18,27 @@ def _tools(tmp_path):
     return cfg, build_tools(cfg, Store(str(tmp_path / "t.db")), FakeProvider())
 
 
-def _run(tmp_path, llm, confirm=lambda a: True):
-    cfg, tools = _tools(tmp_path)
+class VaryingOutputTools:
+    """每次返回都不一样的工具——模拟 run_command 那种带耗时/时间戳的输出。"""
+
+    def __init__(self):
+        self.calls = 0
+        self.plan, self.plan_current = [], 0
+
+    def schemas(self):
+        return []
+
+    def preview(self, name, args):
+        return ""
+
+    def execute(self, name, args):
+        self.calls += 1
+        return f"[exit=1]\n1 failed in {self.calls}.0{self.calls}s"
+
+
+def _run(tmp_path, llm, confirm=lambda a: True, tools=None):
+    cfg, built = _tools(tmp_path)
+    tools = built if tools is None else tools
     events = []
     ans = run_agent("目标", llm=llm, tools=tools, cfg=cfg,
                     emit=events.append, confirm=confirm, memories=[])
@@ -72,6 +91,31 @@ def test_confirm_rejected_skips_write(tmp_path):
     assert not (tmp_path / "x.txt").exists()
 
 
+def test_out_of_sandbox_write_is_fed_back_not_fatal(tmp_path):
+    """越界的 write_file 只该被挡下来喂回模型，不该打死整个任务。
+
+    生成确认卡片的 preview 也要过沙箱，它抛的 SandboxError 原来在 try 之外，
+    一路冒到 web 层变成"出错：…"，会话就此终止——而同样越界的 read_file
+    只是返回一句错误让模型反思。同一类错误，两种下场。
+    """
+    ans, events = _run(tmp_path, ScriptLLM(
+        _call("write_file", {"path": "..\\..\\evil.txt", "content": "x"}),
+        _done("那我换个路径，完成")))
+    assert "完成" in ans
+    tool_events = [e for e in events if e["type"] == "tool"]
+    assert tool_events and "SandboxError" in tool_events[0]["result"]
+    assert not (tmp_path.parent.parent / "evil.txt").exists()
+
+
+def test_missing_tool_argument_is_fed_back_not_fatal(tmp_path):
+    """模型漏传 content 时是 KeyError，同样不能让整个会话陪葬。"""
+    ans, events = _run(tmp_path, ScriptLLM(
+        _call("write_file", {"path": "x.txt"}),
+        _done("补上参数重来，完成")))
+    assert "完成" in ans
+    assert any(e["type"] == "tool" and "KeyError" in e["result"] for e in events)
+
+
 # ---------- 缺陷一：熔断只数异常，工具返回错误字符串时不触发 ----------
 
 def test_circuit_breaker_trips_on_repeated_failure(tmp_path):
@@ -96,6 +140,19 @@ def test_circuit_breaker_nudges_before_terminating(tmp_path):
     tool_msgs = [m["content"] for msgs in llm.seen for m in msgs if m.get("role") == "tool"]
     assert any("重复" in t or "已经" in t for t in tool_msgs), \
         f"第二次重复时没有给模型任何提示：{tool_msgs}"
+
+
+def test_breaker_trips_when_only_the_output_varies(tmp_path):
+    """熔断按「工具+参数+结果」计数，而 run_command 的输出常带耗时/时间戳，
+    逐字比对永远不相等——熔断对它形同虚设，只能一路空跑到步数上限。
+    连着跑同一条命令本身就说明没在推进，不该指望输出一模一样。"""
+    tools = VaryingOutputTools()
+    llm = ScriptLLM(_call("run_command", {"cmd": "pytest"}))    # 永远重复同一条命令
+
+    ans, _ = _run(tmp_path, llm, tools=tools)
+
+    assert "已达最大步数" not in ans, "熔断没生效，一路跑到了步数上限"
+    assert tools.calls < 8, f"命令被跑了 {tools.calls} 次，熔断来得太晚"
 
 
 def test_different_results_do_not_trip_breaker(tmp_path):

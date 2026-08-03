@@ -150,7 +150,7 @@ var log=document.getElementById('log'),planEl=document.getElementById('plan'),me
     workDir=document.getElementById('workDir'),modelEl=document.getElementById('model'),
     goal=document.getElementById('goal'),sendBtn=document.getElementById('send'),toast=document.getElementById('toast');
 
-var CTX_BUDGET=24000, gateEl=null, planDone=0, lastPlan=[];
+var CTX_BUDGET=24000, gateId=null, planDone=0, lastPlan=[];
 
 function el(tag,cls,text){var d=document.createElement(tag);if(cls)d.className=cls;if(text!=null)d.textContent=text;return d;}
 function add(n){log.appendChild(n);log.scrollTop=log.scrollHeight;return n;}
@@ -209,8 +209,12 @@ function diffPre(text){
   return pre;
 }
 
+// 按 id 判重，不是按"当前有没有画着一张卡"。模型一轮里连发两个 write_file 时，
+// 两次确认之间 pending 变空的窗口比 1 秒的轮询周期短得多，看"有没有卡"的话
+// 第二张永远画不出来，页面停在一张已禁用的旧卡上，agent 也就永久卡住了。
 function showGate(p){
-  if(gateEl)return;
+  if(gateId===p.id)return;
+  gateId=p.id;
   var card=el('div','gate'),head=el('div','gate-head');
   var isWrite=p.name==='write_file';
   head.appendChild(el('span','gate-title',isWrite?'写入文件':'执行命令'));
@@ -223,7 +227,7 @@ function showGate(p){
   actions.appendChild(ok);actions.appendChild(no);
   actions.appendChild(el('span','gate-hint',isWrite?'确认后才会落盘；覆盖前自动逐代备份':'工作目录锁死在沙箱内，30 秒超时强制终止'));
   card.appendChild(actions);
-  gateEl=add(row('⏸',card));
+  add(row('⏸',card));
   setStatus('wait','等待你确认');
 
   function done(approved){
@@ -320,7 +324,7 @@ function poll(){
       lastPlan=d.plan;planDone=Math.max(0,(d.plan_current||1)-1);renderPlan(lastPlan,planDone);
     }
     if(d.pending){showGate(d.pending);}
-    else{gateEl=null;setStatus(d.running?'run':'','' + (d.running?'执行中':'空闲'));}
+    else{setStatus(d.running?'run':'','' + (d.running?'执行中':'空闲'));}
     sendBtn.disabled=d.running;
   }).catch(function(){
     if(++failed===3){setStatus('','服务已断开');say('轮询失败，本地服务可能已退出');}

@@ -35,6 +35,9 @@ copy config.example.json config.json
 | `run_command`，其它任何命令 | **必须确认** |
 | `write_file` | **必须确认**（先给你看 diff） |
 
+确认时 agent 线程是真的停在那里等。等待期间页面超过 30 秒没有轮询（多半是被关掉了），
+按「拒绝」处理并继续往下跑——否则线程会永久挂着，运行权也就永远释放不出来。
+
 ## 安全边界
 
 - **目录沙箱**：所有路径先解析成真实绝对路径再判断是否落在 `work_dir` 下，`..`、符号链接、
@@ -48,8 +51,9 @@ copy config.example.json config.json
 ## 数据
 
 - `agent.db` —— 会话、消息、长期记忆（SQLite 单文件）。默认在程序目录，可用 `db_path` 改。
-  **不要放进 `work_dir`**，agent 对那里有写权限，会改到自己的记忆。
-- 写文件前自动逐代备份为 `<原名>.<时间戳>.bak`。备份不设上限，长跑后需要人工清理。
+  **不能放进 `work_dir`**（agent 对那里有写权限，会改到自己的记忆）——放了直接拒绝启动。
+- 写文件前自动逐代备份为 `<原名>.<时间戳>.bak`。备份不设上限，长跑后需要人工清理；
+  `search_in_files` 会跳过它们，否则搜索结果很快全是历代旧副本。
 
 ## 配置项
 
@@ -80,8 +84,10 @@ copy config.example.json config.json
 自动回放**最近一次**会话，下面用一条分隔线标出"以上为上次会话"。正在跑任务时不回放，
 避免和实时推送的事件重复。多会话切换是 Phase 2。
 
-代码里还有几个上限，改 `app/config.py` 即可：单文件 >1MB 拒读、返回给模型的内容 ≤8000 字符、
-命令输出 ≤2000 字符、命令 30 秒超时、单次写入 ≤64000 字符、最多 20 步。
+还有几个上限，键名与 `app/config.py` 的字段名一致，写进 `config.json` 即可覆盖：
+`max_file_bytes` 单文件 >1MB 拒读、`read_output_limit` 返回给模型的内容 ≤8000 字符、
+`cmd_output_limit` 命令输出 ≤2000 字符、`cmd_timeout` 命令 30 秒超时、
+`max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步。
 
 ## 开发
 
@@ -89,7 +95,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-66 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
+108 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 循环与上下文裁剪 ·

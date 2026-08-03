@@ -45,7 +45,8 @@ class ToolSet:
         wd = self.cfg.work_dir
         if name == "list_dir":       return fs.list_dir(wd, args.get("path", "."))
         if name == "read_file":      return fs.read_file(wd, args["path"], self.cfg.max_file_bytes, self.cfg.read_output_limit)
-        if name == "search_in_files":return fs.search_in_files(wd, args["pattern"])
+        if name == "search_in_files":return fs.search_in_files(wd, args["pattern"],
+                                                               max_file_bytes=self.cfg.max_file_bytes)
         if name == "write_file":     return fs.write_file(wd, args["path"], args["content"], self.cfg.max_write_chars)
         if name == "run_command":    return shell.run_command(wd, args["cmd"], self.cfg.cmd_timeout, self.cfg.cmd_output_limit)
         if name == "web_search":     return web_search(args["query"], self.provider)

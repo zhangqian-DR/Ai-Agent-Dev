@@ -33,12 +33,31 @@ def load_config(path: str = "config.json") -> Config:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     work_dir = Path(raw.get("work_dir", "./workspace")).resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
+    db_path = Path(raw.get("db_path", "agent.db")).resolve()
+    # 光靠注释和 README 提醒不够：db 落在 work_dir 里，agent 就能改自己的记忆。
+    if db_path == work_dir or work_dir in db_path.parents:
+        raise ValueError(
+            f"db_path 不能放在 work_dir 里（agent 对那里有写权，会改到自己的记忆）：\n"
+            f"  work_dir = {work_dir}\n  db_path  = {db_path}")
+
+    _defaults = Config("", "", "", work_dir)          # 各上限的默认值只写在 dataclass 里
+
+    def _int(key: str) -> int:
+        return int(raw.get(key, getattr(_defaults, key)))
+
     return Config(
         base_url=raw.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         api_key=raw.get("api_key", ""),
         model=raw.get("model", "qwen-plus"),
         work_dir=work_dir,
-        db_path=Path(raw.get("db_path", "agent.db")).resolve(),
+        db_path=db_path,
         search_provider=raw.get("search_provider", "dashscope"),
-        port=int(raw.get("port", 8000)),
+        port=_int("port"),
+        # 这些上限以前读都不读，用户改了 config.json 完全没反应也没有提示
+        max_steps=_int("max_steps"),
+        cmd_timeout=_int("cmd_timeout"),
+        max_file_bytes=_int("max_file_bytes"),
+        read_output_limit=_int("read_output_limit"),
+        cmd_output_limit=_int("cmd_output_limit"),
+        max_write_chars=_int("max_write_chars"),
     )

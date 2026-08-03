@@ -47,10 +47,17 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
         {"role": "system", "content": system_prompt(cfg.work_dir, memories)},
         {"role": "user", "content": goal},
     ]
-    # 熔断按「工具 + 参数 + 结果」计数，不按异常计数：工具失败时大多是返回
-    # 错误字符串而非抛异常（唯一会抛的是 SandboxError），只数异常的话熔断
-    # 几乎永远不触发。同参同果计数还能顺带抓住「反复做无用功」这类死循环。
+    # 熔断不按异常计数：工具失败时大多是返回错误字符串而非抛异常，只数异常的话
+    # 几乎永远不触发。改用两把尺子量同一件事——「在原地打转」：
+    #
+    #   同参同果累计（outcome_counts）：抓 A→B→A→B 这种交替死循环，
+    #       跨步数累加，但要求结果逐字相同。
+    #   同参连续（consecutive）：run_command 的输出常带耗时/时间戳，逐字比对
+    #       永远不相等，上面那把尺子对它形同虚设；而连着跑同一条命令本身就
+    #       说明没在推进。只数「连续」不数累计，是为了不误杀隔了很多步之后
+    #       正当地重读同一个文件。
     outcome_counts: dict[str, int] = {}
+    last_sig, consecutive = None, 0
     for step in range(1, cfg.max_steps + 1):
         messages = trim_history(messages)
         emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(messages)})
@@ -70,26 +77,33 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
         messages.append(assistant_msg)
         for c in calls:
             name, args = c["name"], c["args"]
-            if needs_confirmation(name, args):
-                if not confirm({"name": name, "preview": tools.preview(name, args)}):
-                    result = "用户拒绝了该操作，已跳过。"
-                    emit({"type": "tool", "name": name, "result": result})
-                    messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
-                    continue
+            # 确认闸和工具执行共用同一个兜底：生成确认卡片的 preview 也要过沙箱，
+            # 模型给个越界路径（SandboxError）或漏传参数（KeyError）时，这些异常
+            # 原来在 try 之外，会一路冒到 web 层把整个会话打死——而同样越界的
+            # read_file 只是返回一句错误让模型反思。统一喂回去，它才有机会重来。
             try:
+                if needs_confirmation(name, args):
+                    if not confirm({"name": name, "preview": tools.preview(name, args)}):
+                        result = "用户拒绝了该操作，已跳过。"
+                        emit({"type": "tool", "name": name, "result": result})
+                        messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+                        continue
                 result = tools.execute(name, args)
             except Exception as e:               # 工具异常→结构化喂回，触发反思
                 result = f"工具执行出错：{type(e).__name__}: {e}"
 
             key = json.dumps([name, args, result], ensure_ascii=False, sort_keys=True)
             outcome_counts[key] = outcome_counts.get(key, 0) + 1
-            seen = outcome_counts[key]
+            sig = json.dumps([name, args], ensure_ascii=False, sort_keys=True)
+            consecutive = consecutive + 1 if sig == last_sig else 1
+            last_sig = sig
+            seen = max(outcome_counts[key], consecutive)
             if seen >= _REPEAT_ABORT:
-                stop = f"同一操作（{name}）连续 {seen} 次得到完全相同的结果，判定为死循环，已终止。"
+                stop = f"同一操作（{name}）已连续第 {seen} 次原地打转，判定为死循环，已终止。"
                 emit({"type": "final", "content": stop})
                 return stop
             if seen == _REPEAT_NUDGE:
-                result += ("\n\n[系统提示] 这个操作你已经执行过一次，结果完全一样。"
+                result += ("\n\n[系统提示] 这个操作你已经执行过一次，没有任何进展。"
                            "不要再重复，先分析失败原因，换一种方法。")
 
             if name == "update_plan":

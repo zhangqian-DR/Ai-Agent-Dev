@@ -32,7 +32,10 @@ def main():
     if not cfg_path.is_file():
         raise SystemExit(f"找不到配置文件：{cfg_path}\n从 config.example.json 复制一份再填 api_key。")
 
-    cfg = load_config(str(cfg_path))
+    try:
+        cfg = load_config(str(cfg_path))
+    except ValueError as e:          # 配置写错是用户的事，别甩一脸 traceback
+        raise SystemExit(f"config.json 有问题：{e}")
     port = find_free_port(cfg.port)
     url = f"http://127.0.0.1:{port}"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -22,14 +23,19 @@ class Session:
 
     def __init__(self):
         self.events = queue.Queue()
-        self.pending = None                  # {"name", "preview"}
+        self.pending = None                  # {"id", "name", "preview"}
+        self._seq = 0                        # 确认闸的递增编号，见 confirm()
         self.plan: list[str] = []
         self.plan_current = 0
         self.running = False
         self.session_id = None
+        self.last_poll = time.time()         # 页面还活着的唯一凭据，见 confirm()
         self._approved = threading.Event()
         self._ok = False
         self._lock = threading.Lock()
+
+    def note_poll(self):
+        self.last_poll = time.time()
 
     def start(self) -> bool:
         """抢占运行权。已经在跑就返回 False——否则两个 agent 会同时改同一批文件。"""
@@ -39,20 +45,35 @@ class Session:
             self.running = True
             return True
 
-    def confirm(self, action):               # 在 agent 线程里调用，阻塞等前端
-        self.pending = action
+    def confirm(self, action, poll_gap=30.0, tick=1.0):
+        """在 agent 线程里调用，阻塞等前端点确认。
+
+        不能无限等：用户直接关掉页面时没人会来应答，线程就永久挂在这里，
+        running 一直是 True，之后每次 /send 都 409，只能重启进程。页面每秒
+        轮询一次，所以"超过 poll_gap 没有轮询"就是页面没了，按拒绝处理收场——
+        拒绝会当成工具结果喂回模型，任务能自己跑完并释放运行权。
+        """
+        # 每次确认给一个递增 id：页面靠它认出"这是新的一次确认"。少了 id 它只能
+        # 记"当前画着一张卡没有"，而模型一轮里连发两个 write_file 时，两次确认
+        # 之间 pending 变空的窗口只有一次写盘那么长，页面 1 秒轮询根本看不到，
+        # 于是第二张卡永远不画，agent 线程永久卡在下面的 wait 上。
+        #
+        # clear 必须在挂 pending 之前：反过来的话，前端在这两行之间抢答一次，
+        # resolve 的 set 会被随后的 clear 抹掉，同样是永久阻塞。
         self._approved.clear()
-        self._approved.wait()
-        self.pending = None
+        self._seq += 1
+        self.pending = dict(action, id=self._seq)
+        try:
+            while not self._approved.wait(tick):
+                if time.time() - self.last_poll > poll_gap:
+                    self._ok = False         # 页面失联，当作用户拒绝
+                    break
+        finally:
+            self.pending = None
         return self._ok
 
     def resolve(self, ok: bool):
         self._ok = ok
-        self._approved.set()
-
-    def abandon(self):
-        """任务结束时兜底放行一次，避免线程卡死在没人回应的确认上。"""
-        self._ok = False
         self._approved.set()
 
     def drain(self):
@@ -69,6 +90,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     the_llm = llm or LLMClient(cfg)
     sess = Session()
     app.state.provider = provider          # 让测试能验证默认这条路建对了没
+    app.state.session = sess
 
     def _emit(ev: dict):
         t = ev.get("type")
@@ -100,7 +122,9 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
                       emit=_emit, confirm=sess.confirm,
                       memories=store.get_memories())
         except Exception as e:
-            sess.events.put({"type": "final", "content": f"出错：{type(e).__name__}: {e}"})
+            # 走 _emit 而不是直接塞队列：不落库的话页面上闪一下就没了，
+            # 下次打开回放的是数据库，用户根本不知道上次为什么没有结果。
+            _emit({"type": "final", "content": f"出错：{type(e).__name__}: {e}"})
         finally:
             sess.pending = None
             sess.running = False
@@ -120,6 +144,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
 
     @app.get("/poll")
     def poll():
+        sess.note_poll()                   # 确认闸靠这个判断页面还在不在
         return {
             "events": sess.drain(),
             "pending": sess.pending,

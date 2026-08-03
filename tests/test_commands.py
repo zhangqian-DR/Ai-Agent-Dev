@@ -27,6 +27,25 @@ def test_path_traversal_in_args_not_readonly():
     assert not is_readonly("type C:\\Windows\\win.ini")
     assert not is_readonly("cat /etc/passwd")
 
+def test_version_flag_anywhere_does_not_whitelist_the_whole_command():
+    # `--version` / `list` 只有作为唯一参数时才是只读操作。
+    # 出现在任意位置就放行的话，`python -c "任意代码" --version` 直接绕过确认闸。
+    assert not is_readonly('python -c "print(1)" --version')
+    assert not is_readonly('python -c "__import__(chr(111)).system(chr(99))" list')
+    assert not is_readonly("pip install requests --version")
+    assert not is_readonly("pip download evil -V")
+    # 真正的只读用法仍要放行
+    assert is_readonly("python --version")
+    assert is_readonly("pip list")
+    assert is_readonly("python3 -V")
+
+def test_env_var_expansion_not_readonly():
+    # shell=True 下 cmd.exe 会把 %USERPROFILE% 展开成绝对路径，
+    # 而参数检查发生在展开之前——不拦 % 的话白名单里的 type 能读走沙箱外任意文件
+    assert not is_readonly("type %USERPROFILE%\\.ssh\\id_rsa")
+    assert not is_readonly("cat %APPDATA%\\config")
+    assert not is_readonly("echo %PATH%")
+
 def test_windows_switches_still_readonly():
     # "/" 在 Windows 是开关字符，不能当成绝对路径误伤
     assert is_readonly("dir /b")

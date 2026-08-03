@@ -111,3 +111,20 @@ def test_search_finds_and_ignores(tmp_path):
     out = search_in_files(tmp_path, "foo")
     assert "a.py" in out
     assert "node_modules" not in out   # 被忽略
+
+def test_search_skips_oversized_files(tmp_path):
+    """整个文件读进内存，不设上限的话 work_dir 里一个大日志就能把搜索卡住。
+    read_file 有 1MB 拒读阈值，搜索没有——同一个风险，只堵了一半。"""
+    (tmp_path / "small.txt").write_text("needle here\n", encoding="utf-8")
+    (tmp_path / "big.log").write_text("needle\n" + "x" * 300_000, encoding="utf-8")
+    out = search_in_files(tmp_path, "needle", max_file_bytes=100_000)
+    assert "small.txt" in out
+    assert "big.log" not in out
+
+def test_search_skips_backup_files(tmp_path):
+    """write_file 每写一次留一代 .bak，跑久了搜索结果里全是历代旧副本。"""
+    (tmp_path / "a.txt").write_text("needle", encoding="utf-8")
+    (tmp_path / "a.txt.20260803-223159.bak").write_text("needle", encoding="utf-8")
+    out = search_in_files(tmp_path, "needle")
+    assert "a.txt:" in out
+    assert ".bak" not in out

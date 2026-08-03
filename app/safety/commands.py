@@ -2,8 +2,13 @@
 _SINGLE = {"dir", "ls", "type", "cat", "pwd", "echo", "whoami"}
 _GIT_SUB = {"status", "diff", "log"}
 # 注意：换行/回车同样是 shell 命令分隔符，必须计入，
-# 否则 "dir\ndel x.txt" 会被判为只读并自动放行
-_META = ["&&", "||", "|", ";", ">", "<", "&", "`", "$(", "\n", "\r"]
+# 否则 "dir\ndel x.txt" 会被判为只读并自动放行。
+# "%" 不是分隔符但同样要拦：shell=True 下 cmd.exe 会展开 %USERPROFILE%，
+# 而下面的参数检查发生在展开之前，看到的还是没有盘符、没有 ".." 的字面量，
+# 于是 "type %USERPROFILE%\.ssh\id_rsa" 会被判为只读并读走沙箱外的文件。
+_META = ["&&", "||", "|", ";", ">", "<", "&", "`", "$(", "%", "\n", "\r"]
+# 这几个开关本身是只读的，但只有当它是唯一参数时才算——见 is_readonly
+_INSPECT_FLAGS = {"--version", "-V", "list"}
 
 def _arg_escapes_sandbox(parts) -> bool:
     """run_command 不经过 resolve_in_sandbox，故在此拦掉明显越界的路径参数。
@@ -33,8 +38,11 @@ def is_readonly(cmd: str) -> bool:
         return True
     if head == "git" and len(parts) >= 2 and parts[1].lower() in _GIT_SUB:
         return True
-    if head in {"python", "python3", "pip", "pip3"} and any(
-        a in parts for a in ("--version", "-V", "list")):
+    # 必须是「解释器 + 唯一的查看开关」这两个 token。之前写成"开关出现在任意
+    # 位置就放行"，于是 `python -c "任意代码" --version` 整条命令被判为只读，
+    # 确认闸形同虚设——而那道闸正是提示注入的最后一层兜底。
+    if head in {"python", "python3", "pip", "pip3"} and len(parts) == 2 \
+            and parts[1] in _INSPECT_FLAGS:
         return True
     return False
 

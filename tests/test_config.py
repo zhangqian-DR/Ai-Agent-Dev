@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.config import load_config
 
 
@@ -43,6 +45,36 @@ def test_db_path_is_outside_work_dir(tmp_path):
     cfg = load_config(str(cfg_file))
     assert cfg.db_path.name == "agent.db"
     assert work.resolve() not in cfg.db_path.parents
+
+
+def test_every_knob_can_be_configured(tmp_path):
+    """写进 config.json 的键得真的生效。原来只读 7 个键，max_steps 之类
+    改了完全没反应，也不报错——用户只会以为是自己填错了地方。"""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "api_key": "", "work_dir": str(tmp_path / "ws"),
+        "max_steps": 40, "cmd_timeout": 5, "max_file_bytes": 123,
+        "read_output_limit": 456, "cmd_output_limit": 789, "max_write_chars": 1011,
+    }), encoding="utf-8")
+    cfg = load_config(str(cfg_file))
+    assert cfg.max_steps == 40
+    assert cfg.cmd_timeout == 5
+    assert cfg.max_file_bytes == 123
+    assert cfg.read_output_limit == 456
+    assert cfg.cmd_output_limit == 789
+    assert cfg.max_write_chars == 1011
+
+
+def test_db_inside_work_dir_is_rejected(tmp_path):
+    """agent 对 work_dir 有写权，db 放进去它就能改到自己的记忆。
+    config.py 的注释和 README 都警告过，但只有代码拦得住。"""
+    cfg_file = tmp_path / "config.json"
+    work = tmp_path / "ws"
+    cfg_file.write_text(json.dumps({
+        "api_key": "", "work_dir": str(work), "db_path": str(work / "sub" / "agent.db"),
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="work_dir"):
+        load_config(str(cfg_file))
 
 
 def test_write_limit_default(tmp_path):

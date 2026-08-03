@@ -83,13 +83,28 @@ def write_file(work_dir: Path, path: str, content: str, max_chars: int = 64_000)
 
 _IGNORE = {".git", "node_modules", "venv", ".venv", "dist", "build", "__pycache__"}
 
-def search_in_files(work_dir: Path, pattern: str, max_hits: int = 50) -> str:
+def search_in_files(work_dir: Path, pattern: str, max_hits: int = 50,
+                    max_file_bytes: int = 1_000_000) -> str:
+    """跳过三类文件：
+
+    - 忽略目录里的（依赖、构建产物）；
+    - 二进制；
+    - 超过 ``max_file_bytes`` 的 —— 整个文件是一次性读进内存的，
+      跟 ``read_file`` 是同一个风险，这里不设限就等于只堵了一半；
+    - ``.bak`` —— ``write_file`` 每写一次留一代备份，跑久了命中全是历代旧副本，
+      模型据此改代码会改到早就被覆盖掉的版本上。
+    """
     root = work_dir.resolve()
     hits = []
     for f in root.rglob("*"):
         if any(part in _IGNORE for part in f.parts):
             continue
-        if not f.is_file() or f.suffix.lower() in _BINARY_EXT:
+        if not f.is_file() or f.suffix.lower() in _BINARY_EXT or f.suffix.lower() == ".bak":
+            continue
+        try:
+            if f.stat().st_size > max_file_bytes:
+                continue
+        except OSError:
             continue
         try:
             for i, line in enumerate(f.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
