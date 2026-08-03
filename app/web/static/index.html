@@ -103,6 +103,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
   border:1px solid var(--line);background:var(--bg);color:var(--text)}
 .composer input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .toast{font-size:12.5px;color:var(--danger)}
+.sep{text-align:center;font-size:11.5px;color:var(--text-faint);font-family:var(--mono);
+  margin:6px 0;display:flex;align-items:center;gap:10px}
+.sep::before,.sep::after{content:"";flex:1;height:1px;background:var(--line)}
 </style>
 </head>
 <body>
@@ -255,20 +258,51 @@ function send(){
     .catch(function(){say('连不上本地服务，确认 python main.py 还在运行');});
 }
 
-var failed=0;
+function planCard(steps){
+  toolCard('update_plan',(steps||[]).map(function(s,i){return (i+1)+'. '+s;}).join('\n'),'自动放行');
+}
+
+// 回放上一次会话：关掉页面再打开，聊天记录还在
+function restore(){
+  return fetch('/history').then(function(r){return r.json();}).then(function(h){
+    var ms=h.messages||[];
+    if(!ms.length)return;
+    ms.forEach(function(m){
+      if(m.role==='user')msg('user','你',m.content);
+      else if(m.role==='assistant')msg('think','🤖',m.content);
+      else if(m.role==='final')msg((m.content||'').indexOf('出错：')===0?'err':'final','✅',m.content);
+      else if(m.role==='tool')toolCard(m.tool||'tool',m.content,
+        (m.content||'').indexOf('用户拒绝')===0?'已拒绝':'自动放行',
+        (m.content||'').indexOf('用户拒绝')===0?'skip':'');
+      else if(m.role==='plan'){
+        try{var st=JSON.parse(m.content);lastPlan=st;planDone=st.length;renderPlan(st,st.length);planCard(st);}catch(e){}
+      }
+    });
+    var sep=el('div','sep','—— 以上为上次会话（'+(h.title||'')+'）——');
+    add(sep);
+  }).catch(function(){});
+}
+
+var failed=0,firstPoll=true;
 function poll(){
   fetch('/poll').then(function(r){return r.json();}).then(function(d){
     failed=0;
     workDir.textContent=d.work_dir;modelEl.textContent=d.model;
     if(d.max_steps)stepsEl.textContent=stepsEl.textContent.replace(/\/ \d+$/,'/ '+d.max_steps);
+    // 首次轮询：没有任务在跑时才回放历史，避免和正在推送的事件重复
+    // 返回 promise 让 finally 等它跑完再排下一次；不能在这里自己 scheduleNext，会排两遍
+    if(firstPoll){firstPoll=false;if(!d.running)return restore();}
     (d.events||[]).forEach(handle);
+    // 计划面板从 /poll 的 plan 字段恢复——事件流是一次性的，刷新后就没了
+    if((d.plan||[]).length&&!lastPlan.length){lastPlan=d.plan;renderPlan(d.plan,planDone);}
     if(d.pending){showGate(d.pending);}
     else{gateEl=null;setStatus(d.running?'run':'','' + (d.running?'执行中':'空闲'));}
     sendBtn.disabled=d.running;
   }).catch(function(){
     if(++failed===3){setStatus('','服务已断开');say('轮询失败，本地服务可能已退出');}
-  }).finally(function(){setTimeout(poll,1000);});
+  }).finally(scheduleNext);
 }
+function scheduleNext(){setTimeout(poll,1000);}
 
 fetch('/memories').then(function(r){return r.json();}).then(function(d){
   var list=d.memories||[];memEl.innerHTML='';

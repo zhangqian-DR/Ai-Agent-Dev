@@ -14,6 +14,9 @@ class Config:
     # agent.db 单独配，不要放进 work_dir（agent 能读写那里，会改到自己的记忆），
     # 也不要放 work_dir 的上级目录（那是别人的地盘）。默认落在程序自己的目录。
     db_path: Path = Path("agent.db")
+    # dashscope：复用同一个 api_key，从被 DDG 风控的网络出口也能用，但拿不到 URL
+    # duckduckgo：免 key、有 URL，但对网络出口敏感
+    search_provider: str = "dashscope"
     port: int = 8000
     max_steps: int = 20
     cmd_timeout: int = 30
@@ -36,5 +39,6 @@ def load_config(path: str = "config.json") -> Config:
         model=raw.get("model", "qwen-plus"),
         work_dir=work_dir,
         db_path=Path(raw.get("db_path", "agent.db")).resolve(),
+        search_provider=raw.get("search_provider", "dashscope"),
         port=int(raw.get("port", 8000)),
     )

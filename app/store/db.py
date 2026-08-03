@@ -25,6 +25,12 @@ class Store:
         self.conn.commit()
         return cur.lastrowid
 
+    def latest_session(self) -> dict:
+        """最近一次会话。页面重新打开时用它恢复上一轮的聊天记录。"""
+        r = self.conn.execute(
+            "SELECT id,title,created_at FROM sessions ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(r) if r else {}
+
     def add_message(self, session_id, role, content, tool_calls="", tool_results=""):
         self.conn.execute(
             "INSERT INTO messages(session_id,role,content,tool_calls,tool_results) VALUES(?,?,?,?,?)",

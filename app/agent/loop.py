@@ -56,7 +56,9 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
         emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(messages)})
         resp = llm.chat(messages, tools.schemas())
         content, calls = resp["content"], resp["tool_calls"]
-        if content:
+        # 没有 tool_calls 时这段 content 就是最终回答，只以 final 发一次。
+        # 两个都发的话页面上同一段话会显示两遍，数据库里也会存两条。
+        if content and calls:
             emit({"type": "assistant", "content": content})
         if not calls:
             emit({"type": "final", "content": content or ""})

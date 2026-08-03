@@ -69,12 +69,23 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     sess = Session()
 
     def _emit(ev: dict):
+        t = ev.get("type")
         # 计划面板要能在刷新后恢复，所以 plan 单独存一份而不是只走事件流
-        if ev.get("type") == "plan":
+        if t == "plan":
             sess.plan = list(ev.get("steps") or [])
         sess.events.put(ev)
-        if sess.session_id is not None and ev.get("type") in ("assistant", "final"):
-            store.add_message(sess.session_id, "assistant", ev.get("content", ""))
+
+        # 落库，供下次打开页面回放。step 是瞬时进度，不入库。
+        if sess.session_id is None or t == "step":
+            return
+        if t == "plan":
+            store.add_message(sess.session_id, "plan",
+                              json.dumps(ev.get("steps") or [], ensure_ascii=False))
+        elif t == "tool":
+            store.add_message(sess.session_id, "tool", ev.get("result", ""),
+                              tool_calls=ev.get("name", ""))
+        else:                                    # assistant / final
+            store.add_message(sess.session_id, t, ev.get("content", ""))
 
     def _work(goal: str):
         try:
@@ -120,6 +131,16 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             return JSONResponse({"ok": False, "error": "当前没有待确认的操作"}, status_code=409)
         sess.resolve(bool((body or {}).get("ok")))
         return {"ok": True}
+
+    @app.get("/history")
+    def history():
+        """最近一次会话的完整记录，供页面重新打开时回放。"""
+        s = store.latest_session()
+        if not s:
+            return {"title": "", "created_at": "", "messages": []}
+        msgs = [{"role": m["role"], "content": m["content"], "tool": m["tool_calls"] or ""}
+                for m in store.get_messages(s["id"])]
+        return {"title": s["title"], "created_at": s.get("created_at", ""), "messages": msgs}
 
     @app.get("/memories")
     def memories():

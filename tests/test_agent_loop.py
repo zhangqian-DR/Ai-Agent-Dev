@@ -106,6 +106,24 @@ def test_different_results_do_not_trip_breaker(tmp_path):
     assert "完成" in ans
 
 
+def test_final_answer_is_not_emitted_twice(tmp_path):
+    """没有 tool_calls 时那段 content 就是最终回答，只该以 final 出现一次。
+    原来 assistant 和 final 都发，页面上同一段话显示两遍，数据库里也存两条。"""
+    _, events = _run(tmp_path, ScriptLLM(_done("这是最终回答")))
+
+    kinds = [e["type"] for e in events if e["type"] in ("assistant", "final")]
+    assert kinds == ["final"], f"最终回答被发了 {len(kinds)} 次：{kinds}"
+
+
+def test_thinking_text_still_emitted_when_calling_tools(tmp_path):
+    """但有工具调用时，那段思考文字仍然要显示——它不是最终回答。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    llm = ScriptLLM({"content": "我先读文件", "tool_calls":
+                     [{"id": "1", "name": "read_file", "args": {"path": "a.txt"}}]}, _done())
+    _, events = _run(tmp_path, llm)
+    assert any(e["type"] == "assistant" and e["content"] == "我先读文件" for e in events)
+
+
 def test_step_events_report_progress_and_context(tmp_path):
     """页面要能显示「第几步 / 上下文占用」，这两个数只有循环里知道。"""
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
