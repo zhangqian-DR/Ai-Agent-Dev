@@ -244,12 +244,15 @@ function handle(e){
   }else if(e.type==='assistant'){
     msg('think','🤖',e.content);
   }else if(e.type==='plan'){
-    planDone=0;renderPlan(e.steps,0);
-    toolCard('update_plan',(e.steps||[]).map(function(s,i){return (i+1)+'. '+s;}).join('\n'),'自动放行');
+    // 进度用模型自报的 current，不再数工具调用次数——计划的步骤粒度和
+    // 工具调用粒度天然对不上（一步「编写并保存」实际只有一次 write_file）
+    var first=!lastPlan.length;
+    lastPlan=e.steps||[];planDone=Math.max(0,(e.current||1)-1);
+    renderPlan(lastPlan,planDone);
+    if(first)planCard(lastPlan);      // 只在计划首次出现时画卡片，推进时不刷屏
   }else if(e.type==='tool'){
     var rejected=(e.result||'').indexOf('用户拒绝')===0;
     toolCard(e.name,e.result,rejected?'已拒绝':'自动放行',rejected?'skip':'');
-    if(lastPlan.length){planDone=Math.min(lastPlan.length,planDone+1);renderPlan(lastPlan,planDone);}
   }else if(e.type==='final'){
     var bad=(e.content||'').indexOf('出错：')===0;
     msg(bad?'err':'final',bad?'✖':'✅',e.content);
@@ -287,7 +290,14 @@ function restore(){
         (m.content||'').indexOf('用户拒绝')===0?'已拒绝':'自动放行',
         (m.content||'').indexOf('用户拒绝')===0?'skip':'');
       else if(m.role==='plan'){
-        try{var st=JSON.parse(m.content);lastPlan=st;planDone=st.length;renderPlan(st,st.length);planCard(st);}catch(e){}
+        try{
+          var v=JSON.parse(m.content);
+          var st=Array.isArray(v)?v:(v.steps||[]);        // 兼容早期只存数组的记录
+          var first=!lastPlan.length;
+          lastPlan=st;planDone=Array.isArray(v)?st.length:Math.max(0,(v.current||1)-1);
+          renderPlan(st,planDone);
+          if(first)planCard(st);
+        }catch(e){}
       }
     });
     var sep=el('div','sep','—— 以上为上次会话（'+(h.title||'')+'）——');
@@ -305,8 +315,10 @@ function poll(){
     // 返回 promise 让 finally 等它跑完再排下一次；不能在这里自己 scheduleNext，会排两遍
     if(firstPoll){firstPoll=false;if(!d.running)return restore();}
     (d.events||[]).forEach(handle);
-    // 计划面板从 /poll 的 plan 字段恢复——事件流是一次性的，刷新后就没了
-    if((d.plan||[]).length&&!lastPlan.length){lastPlan=d.plan;renderPlan(d.plan,planDone);}
+    // 计划面板从 /poll 恢复——事件流是一次性的，刷新后就没了
+    if((d.plan||[]).length&&!lastPlan.length){
+      lastPlan=d.plan;planDone=Math.max(0,(d.plan_current||1)-1);renderPlan(lastPlan,planDone);
+    }
     if(d.pending){showGate(d.pending);}
     else{gateEl=null;setStatus(d.running?'run':'','' + (d.running?'执行中':'空闲'));}
     sendBtn.disabled=d.running;

@@ -12,6 +12,7 @@ class ToolSet:
     def __init__(self, cfg, store, provider):
         self.cfg, self.store, self.provider = cfg, store, provider
         self.plan: list[str] = []
+        self.plan_current: int = 0        # 模型自报的当前步号，从 1 开始；0 表示还没有计划
 
     def schemas(self):
         s = lambda: {"type": "string"}
@@ -22,8 +23,13 @@ class ToolSet:
             _schema("write_file", "写入/覆盖工作目录内的文件（会先给你确认）",
                     {"path": s(), "content": s()}, ["path", "content"]),
             _schema("run_command", "在工作目录内执行命令（危险命令会先确认）", {"cmd": s()}, ["cmd"]),
-            _schema("update_plan", "更新任务步骤清单",
-                    {"steps": {"type": "array", "items": {"type": "string"}}}, ["steps"]),
+            _schema("update_plan",
+                    "更新任务步骤清单，并报告当前进行到第几步。每完成一步就带着同一份 steps "
+                    "重新调用一次，只把 current 加一，用户界面的计划面板据此显示进度。",
+                    {"steps": {"type": "array", "items": {"type": "string"}},
+                     "current": {"type": "integer",
+                                 "description": "当前正在进行的步骤序号，从 1 开始"}},
+                    ["steps"]),
             _schema("web_search", "联网搜索资料", {"query": s()}, ["query"]),
             _schema("save_memory", "记住关于用户的一条长期事实", {"fact": s()}, ["fact"]),
         ]
@@ -44,7 +50,16 @@ class ToolSet:
         if name == "run_command":    return shell.run_command(wd, args["cmd"], self.cfg.cmd_timeout, self.cfg.cmd_output_limit)
         if name == "web_search":     return web_search(args["query"], self.provider)
         if name == "update_plan":
-            self.plan = list(args["steps"]);  return "计划已更新：\n" + "\n".join(f"- {x}" for x in self.plan)
+            self.plan = list(args["steps"])
+            # 模型偶尔会报越界的步号，夹一下，免得面板算出负数下标或高亮到不存在的行
+            try:
+                cur = int(args.get("current") or 1)
+            except (TypeError, ValueError):
+                cur = 1
+            self.plan_current = max(1, min(cur, len(self.plan))) if self.plan else 0
+            body = "\n".join(f"{'▸' if i + 1 == self.plan_current else ' '} {i + 1}. {x}"
+                             for i, x in enumerate(self.plan))
+            return f"计划已更新（当前 {self.plan_current}/{len(self.plan)} 步）：\n{body}"
         if name == "save_memory":
             self.store.add_memory(args["fact"]);  return f"已记住：{args['fact']}"
         return f"未知工具：{name}"

@@ -6,7 +6,10 @@ def system_prompt(work_dir, memories: list[str]) -> str:
 可用工具：list_dir/read_file/search_in_files/write_file/run_command/update_plan/web_search/save_memory。
 
 工作方式（ReAct + 规划 + 反思）：
-1. 先用 update_plan 给出步骤清单，再逐步执行。
+1. 需要动手的任务先用 update_plan 给出步骤清单（带 current=1），再逐步执行。
+   每完成一步，带着**同一份 steps**重新调一次 update_plan，只把 current 加一——
+   用户界面的计划面板靠这个数显示进度，你不报它就一直停在第一步。
+   纯咨询或闲聊不需要计划，直接回答即可。
 2. 每步先简述你要做什么和为什么（思考），再调用工具。
 3. 工具报错时，先分析原因再重试或换方法，不要盲目重复同一操作。
 4. 认为完成前，对照计划自检是否真的达成目标、有无遗漏或未验证；没达成就继续。

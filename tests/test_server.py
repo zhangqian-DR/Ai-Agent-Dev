@@ -147,6 +147,41 @@ def test_index_page_is_served(tmp_path):
     assert "/approve" in r.text          # 页面确实接了确认接口
 
 
+class PlanLLM:
+    def __init__(self):
+        self.n = 0
+
+    def chat(self, m, t):
+        self.n += 1
+        if self.n <= 2:
+            return {"content": None, "tool_calls": [{"id": str(self.n), "name": "update_plan",
+                    "args": {"steps": ["一", "二", "三"], "current": self.n * 2 - 1}}]}
+        return {"content": "做完了", "tool_calls": []}
+
+
+def test_poll_exposes_plan_progress(tmp_path):
+    """刷新页面后进度也要还原，不能只还原步骤列表。"""
+    client = TestClient(_app(tmp_path, PlanLLM()))
+    client.post("/send", json={"goal": "干活"})
+    _drain(client)
+    d = client.get("/poll").json()
+    assert d["plan"] == ["一", "二", "三"]
+    assert d["plan_current"] == 3
+
+
+def test_history_keeps_plan_progress(tmp_path):
+    store = Store(str(_db(tmp_path)))
+    cfg = Config("", "", "qwen-max", tmp_path, db_path=_db(tmp_path))
+    client = TestClient(create_app(cfg, llm=PlanLLM(), store=store, provider=FakeProvider()))
+    client.post("/send", json={"goal": "干活"})
+    _drain(client)
+    plans = [m for m in client.get("/history").json()["messages"] if m["role"] == "plan"]
+    assert plans, "历史里要有 plan"
+    import json as _json
+    last = _json.loads(plans[-1]["content"])
+    assert last["steps"] == ["一", "二", "三"] and last["current"] == 3
+
+
 def test_history_endpoint_replays_last_session(tmp_path):
     """关掉页面再打开要能看回上一轮做了什么，否则聊天记录等于没存。"""
     store = Store(str(tmp_path.parent / "r.db"))

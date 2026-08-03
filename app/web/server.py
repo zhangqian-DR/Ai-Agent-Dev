@@ -24,6 +24,7 @@ class Session:
         self.events = queue.Queue()
         self.pending = None                  # {"name", "preview"}
         self.plan: list[str] = []
+        self.plan_current = 0
         self.running = False
         self.session_id = None
         self._approved = threading.Event()
@@ -74,14 +75,16 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         # 计划面板要能在刷新后恢复，所以 plan 单独存一份而不是只走事件流
         if t == "plan":
             sess.plan = list(ev.get("steps") or [])
+            sess.plan_current = int(ev.get("current") or 0)
         sess.events.put(ev)
 
         # 落库，供下次打开页面回放。step 是瞬时进度，不入库。
         if sess.session_id is None or t == "step":
             return
         if t == "plan":
-            store.add_message(sess.session_id, "plan",
-                              json.dumps(ev.get("steps") or [], ensure_ascii=False))
+            store.add_message(sess.session_id, "plan", json.dumps(
+                {"steps": ev.get("steps") or [], "current": ev.get("current") or 0},
+                ensure_ascii=False))
         elif t == "tool":
             store.add_message(sess.session_id, "tool", ev.get("result", ""),
                               tool_calls=ev.get("name", ""))
@@ -111,6 +114,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             return JSONResponse({"ok": False, "error": "上一个任务还在跑，等它结束或刷新页面"},
                                 status_code=409)
         sess.plan = []
+        sess.plan_current = 0
         threading.Thread(target=_work, args=(goal,), daemon=True).start()
         return {"ok": True}
 
@@ -121,6 +125,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             "pending": sess.pending,
             "running": sess.running,
             "plan": sess.plan,
+            "plan_current": sess.plan_current,
             "work_dir": str(cfg.work_dir),
             "model": cfg.model,
             "max_steps": cfg.max_steps,

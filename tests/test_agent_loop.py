@@ -124,6 +124,19 @@ def test_thinking_text_still_emitted_when_calling_tools(tmp_path):
     assert any(e["type"] == "assistant" and e["content"] == "我先读文件" for e in events)
 
 
+def test_plan_event_carries_current(tmp_path):
+    """面板要靠模型自己报的步号，而不是数工具调用次数——两者粒度对不上。"""
+    llm = ScriptLLM(
+        _call("update_plan", {"steps": ["查资料", "写代码", "跑起来"], "current": 1}),
+        _call("update_plan", {"steps": ["查资料", "写代码", "跑起来"], "current": 3}, cid="2"),
+        _done())
+    _, events = _run(tmp_path, llm)
+
+    plans = [e for e in events if e["type"] == "plan"]
+    assert [p["current"] for p in plans] == [1, 3]
+    assert plans[0]["steps"] == ["查资料", "写代码", "跑起来"]
+
+
 def test_step_events_report_progress_and_context(tmp_path):
     """页面要能显示「第几步 / 上下文占用」，这两个数只有循环里知道。"""
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")

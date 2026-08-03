@@ -93,7 +93,7 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
                            "不要再重复，先分析失败原因，换一种方法。")
 
             if name == "update_plan":
-                emit({"type": "plan", "steps": tools.plan})
+                emit({"type": "plan", "steps": tools.plan, "current": tools.plan_current})
             else:
                 emit({"type": "tool", "name": name, "result": result})
             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
