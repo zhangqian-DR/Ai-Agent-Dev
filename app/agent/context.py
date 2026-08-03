@@ -29,6 +29,12 @@ def _size(msgs) -> int:
     return sum(_msg_size(m) for m in msgs)
 
 
+def history_size(messages: list[dict]) -> int:
+    """当前历史占用的字符数。页面用它显示上下文占用条——裁剪一旦触发 agent 就会
+    "忘掉"前面的步骤，让预算可见，用户能预判而不是突然发现它失忆。"""
+    return _size(messages)
+
+
 def _group(body: list[dict]) -> list[list[dict]]:
     """把消息序列切成不可分割的组。
 

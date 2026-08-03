@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from app.agent.prompt import system_prompt
-from app.agent.context import trim_history
+from app.agent.context import history_size, trim_history
 from app.safety.commands import needs_confirmation
 
 # 历史里单个参数值保留的字符数（工具已执行完，模型不需要再看一遍完整内容）
@@ -51,8 +51,9 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
     # 错误字符串而非抛异常（唯一会抛的是 SandboxError），只数异常的话熔断
     # 几乎永远不触发。同参同果计数还能顺带抓住「反复做无用功」这类死循环。
     outcome_counts: dict[str, int] = {}
-    for _ in range(cfg.max_steps):
+    for step in range(1, cfg.max_steps + 1):
         messages = trim_history(messages)
+        emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(messages)})
         resp = llm.chat(messages, tools.schemas())
         content, calls = resp["content"], resp["tool_calls"]
         if content:

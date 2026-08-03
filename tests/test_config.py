@@ -35,6 +35,16 @@ def test_read_limits_are_two_separate_knobs(tmp_path):
     assert cfg.read_output_limit < cfg.max_file_bytes
 
 
+def test_db_path_is_outside_work_dir(tmp_path):
+    """agent.db 不能落在 work_dir 里——agent 对那里有读写权，会改到自己的记忆。"""
+    cfg_file = tmp_path / "config.json"
+    work = tmp_path / "ws"
+    cfg_file.write_text(json.dumps({"api_key": "", "work_dir": str(work)}), encoding="utf-8")
+    cfg = load_config(str(cfg_file))
+    assert cfg.db_path.name == "agent.db"
+    assert work.resolve() not in cfg.db_path.parents
+
+
 def test_write_limit_default(tmp_path):
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps({"api_key": ""}), encoding="utf-8")

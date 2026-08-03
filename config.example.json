@@ -1,0 +1,8 @@
+{
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "api_key": "",
+  "model": "qwen-plus",
+  "work_dir": "./workspace",
+  "db_path": "./agent.db",
+  "port": 8000
+}

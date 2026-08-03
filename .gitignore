@@ -6,3 +6,5 @@ __pycache__/
 venv/
 agent.db
 config.json
+workspace/
+*.bak

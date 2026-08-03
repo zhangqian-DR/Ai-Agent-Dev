@@ -106,6 +106,17 @@ def test_different_results_do_not_trip_breaker(tmp_path):
     assert "完成" in ans
 
 
+def test_step_events_report_progress_and_context(tmp_path):
+    """页面要能显示「第几步 / 上下文占用」，这两个数只有循环里知道。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    _, events = _run(tmp_path, ScriptLLM(_call("read_file", {"path": "a.txt"}), _done()))
+
+    steps = [e for e in events if e["type"] == "step"]
+    assert [s["n"] for s in steps] == [1, 2]
+    assert all(s["max"] == 20 for s in steps)
+    assert steps[1]["chars"] > steps[0]["chars"]   # 历史在增长
+
+
 # ---------- 缺陷二：执行完的超大 arguments 一直占着历史 ----------
 
 def test_large_tool_arguments_shrunk_after_execution(tmp_path):
