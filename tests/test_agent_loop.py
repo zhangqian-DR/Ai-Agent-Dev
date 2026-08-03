@@ -142,6 +142,33 @@ def test_circuit_breaker_nudges_before_terminating(tmp_path):
         f"第二次重复时没有给模型任何提示：{tool_msgs}"
 
 
+def test_rejected_tool_event_carries_a_flag(tmp_path):
+    """页面原来靠 result 以「用户拒绝」开头判断这步被跳过了——工具真返回一句
+    以那三个字开头的正常结果就会被误标。改成事件里带明确标志。"""
+    _, events = _run(tmp_path, ScriptLLM(
+        _call("write_file", {"path": "x.txt", "content": "hi"}), _done("已取消")),
+        confirm=lambda a: False)
+
+    tool = [e for e in events if e["type"] == "tool"][0]
+    assert tool["ok"] is False
+
+
+def test_normal_tool_event_is_marked_ok(tmp_path):
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    _, events = _run(tmp_path, ScriptLLM(_call("read_file", {"path": "a.txt"}), _done()))
+
+    tool = [e for e in events if e["type"] == "tool"][0]
+    assert tool["ok"] is True
+
+
+def test_final_event_is_marked_ok(tmp_path):
+    """正常回答要带 ok=True——页面据此决定画绿框还是红框，
+    而不是看这段话是不是以「出错：」开头。"""
+    _, events = _run(tmp_path, ScriptLLM(_done("出错：这三个字开头的正常回答")))
+
+    assert [e for e in events if e["type"] == "final"][0]["ok"] is True
+
+
 def test_breaker_trips_when_only_the_output_varies(tmp_path):
     """熔断按「工具+参数+结果」计数，而 run_command 的输出常带耗时/时间戳，
     逐字比对永远不相等——熔断对它形同虚设，只能一路空跑到步数上限。

@@ -95,7 +95,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-108 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
+120 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 循环与上下文裁剪 ·
@@ -115,7 +115,9 @@ diff，没有注册成工具，模型看不到它。
 - 页面 1 秒轮询，没有流式打字机效果。
 - `run_command` 用 `shell=True`。在"白名单外全部人工确认 + 用户看到完整命令 + cwd 锁死沙箱"
   三重前提下 MVP 可接受，Phase 2 收紧为 `shell=False` + 参数数组。
-- `Store` 的 sqlite 连接不主动关闭，程序运行期间 `agent.db` 会被占用，删不掉也移不走。
+- 程序运行期间 `agent.db` 会被 sqlite 占用（删不掉也移不走），正常退出时释放。
+  连接跨线程共享，所有读写都过同一把锁——没有锁的话退出时关连接会撞上 agent
+  线程正在写，直接访问违规而不是抛异常。
 - Python 3.8 下 `duckduckgo-search` 只能用 5.3.1（6.x 依赖的 Rust 扩展没有 py38 wheel）。
   升到 3.10+ 后可以换回 6.2.0。
 

@@ -255,10 +255,10 @@ function handle(e){
     renderPlan(lastPlan,planDone);
     if(changed)planCard(lastPlan);    // 只在清单本身变了时画卡片，推进时不刷屏
   }else if(e.type==='tool'){
-    var rejected=(e.result||'').indexOf('用户拒绝')===0;
+    var rejected=e.ok===false;
     toolCard(e.name,e.result,rejected?'已拒绝':'自动放行',rejected?'skip':'');
   }else if(e.type==='final'){
-    var bad=(e.content||'').indexOf('出错：')===0;
+    var bad=e.ok===false;
     msg(bad?'err':'final',bad?'✖':'✅',e.content);
     if(lastPlan.length)renderPlan(lastPlan,lastPlan.length);
     else planNote('本次无需计划');
@@ -292,6 +292,14 @@ function samePlan(a,b){
   return true;
 }
 
+// 实时事件里有 ok 标志，直接看标志就行；数据库里的记录看 status。
+// 但 status 这一列是后加的，早于它写进去的记录一律是空串——对这批老记录只能
+// 退回去看开头几个字。新记录不会走到兜底，因为它们的 status 一定有值。
+function isBad(m,flag,legacyPrefix){
+  if(m.status)return m.status===flag;
+  return (m.content||'').indexOf(legacyPrefix)===0;
+}
+
 // 回放上一次会话：关掉页面再打开，聊天记录还在
 function restore(){
   return fetch('/history').then(function(r){return r.json();}).then(function(h){
@@ -301,16 +309,17 @@ function restore(){
       if(m.role==='user')msg('user','你',m.content);
       else if(m.role==='assistant')msg('think','🤖',m.content);
       else if(m.role==='final'){
-        var bad=(m.content||'').indexOf('出错：')===0;
+        var bad=isBad(m,'error','出错：');
         msg(bad?'err':'final',bad?'✖':'✅',m.content);   // 图标也要跟着判，别红框配 ✅
         // 和实时路径一样把所有步骤划成完成。不补这一句的话，回放一个已经跑完的
         // 会话，面板会停在最后一次自报的 current 上，看着像没跑完。
         // 没有计划时不写"本次无需计划"——页面刚打开，占位的"等待任务"才是实话。
         if(lastPlan.length)renderPlan(lastPlan,lastPlan.length);
       }
-      else if(m.role==='tool')toolCard(m.tool||'tool',m.content,
-        (m.content||'').indexOf('用户拒绝')===0?'已拒绝':'自动放行',
-        (m.content||'').indexOf('用户拒绝')===0?'skip':'');
+      else if(m.role==='tool'){
+        var skipped=isBad(m,'rejected','用户拒绝');
+        toolCard(m.tool||'tool',m.content,skipped?'已拒绝':'自动放行',skipped?'skip':'');
+      }
       else if(m.role==='plan'){
         try{
           var v=JSON.parse(m.content);

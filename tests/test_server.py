@@ -1,6 +1,8 @@
+import sqlite3
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Config
@@ -211,6 +213,46 @@ def test_task_failure_is_persisted(tmp_path):
 
     replayed = client.get("/history").json()["messages"]
     assert any("出错" in m["content"] for m in replayed), "失败没进数据库，回放时丢了"
+
+
+def test_error_final_is_flagged_and_persisted(tmp_path):
+    """出错与否是事件自己说的，不是页面从「出错：」这三个字猜的；
+    落库也要带上，否则回放时又退回去猜。"""
+    client = TestClient(_app(tmp_path, BoomLLM()))
+    client.post("/send", json={"goal": "会炸的任务"})
+
+    events, _ = _drain(client)
+    assert [e for e in events if e["type"] == "final"][0]["ok"] is False
+
+    replayed = client.get("/history").json()["messages"]
+    assert any(m["status"] == "error" for m in replayed)
+
+
+def test_rejection_is_flagged_and_persisted(tmp_path):
+    client = TestClient(_app(tmp_path, WriteLLM()))
+    client.post("/send", json={"goal": "写文件"})
+    assert _wait_pending(client) is not None
+    client.post("/approve", json={"ok": False})
+    _drain(client)
+
+    replayed = client.get("/history").json()["messages"]
+    assert any(m["status"] == "rejected" for m in replayed)
+
+
+def test_shutdown_closes_the_store(tmp_path):
+    """程序退出后不该还占着 agent.db。"""
+    db = _db(tmp_path)
+    store = Store(str(db))
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    app = create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider())
+
+    with TestClient(app):
+        pass                                     # 进出一次，跑完 startup/shutdown
+
+    # 直接问连接本身。Store 的方法在关掉之后是返回空而不是抛异常
+    # （守护线程收尾时还可能来写），所以拿它们判断不出关没关。
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.conn.execute("SELECT 1")
 
 
 def test_poll_marks_the_page_alive(tmp_path):

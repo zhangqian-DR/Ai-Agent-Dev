@@ -68,7 +68,10 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
         if content and calls:
             emit({"type": "assistant", "content": content})
         if not calls:
-            emit({"type": "final", "content": content or ""})
+            # ok 由事件自己说明，不让页面去看这段话是不是以「出错：」开头——
+            # 模型正常回答只要以那三个字开头就会被渲染成红色错误框。
+            # 熔断终止和步数用尽也算 ok：那是任务的正常收场，不是程序出错。
+            emit({"type": "final", "content": content or "", "ok": True})
             return content or ""
         # 记录 assistant 的 tool_calls 到历史（OpenAI 协议要求）
         assistant_msg = {"role": "assistant", "content": content or "",
@@ -85,7 +88,8 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
                 if needs_confirmation(name, args):
                     if not confirm({"name": name, "preview": tools.preview(name, args)}):
                         result = "用户拒绝了该操作，已跳过。"
-                        emit({"type": "tool", "name": name, "result": result})
+                        # 同理：被拒绝这件事由标志说了算，不靠 result 的开头几个字
+                        emit({"type": "tool", "name": name, "result": result, "ok": False})
                         messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
                         continue
                 result = tools.execute(name, args)
@@ -100,7 +104,7 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
             seen = max(outcome_counts[key], consecutive)
             if seen >= _REPEAT_ABORT:
                 stop = f"同一操作（{name}）已连续第 {seen} 次原地打转，判定为死循环，已终止。"
-                emit({"type": "final", "content": stop})
+                emit({"type": "final", "content": stop, "ok": True})
                 return stop
             if seen == _REPEAT_NUDGE:
                 result += ("\n\n[系统提示] 这个操作你已经执行过一次，没有任何进展。"
@@ -109,8 +113,8 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
             if name == "update_plan":
                 emit({"type": "plan", "steps": tools.plan, "current": tools.plan_current})
             else:
-                emit({"type": "tool", "name": name, "result": result})
+                emit({"type": "tool", "name": name, "result": result, "ok": True})
             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
         _shrink_tool_args(assistant_msg)
-    emit({"type": "final", "content": "已达最大步数，停止。"})
+    emit({"type": "final", "content": "已达最大步数，停止。", "ok": True})
     return "已达最大步数，停止。"

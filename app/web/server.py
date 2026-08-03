@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -84,8 +85,17 @@ class Session:
 
 
 def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
-    app = FastAPI(title="win-ai-agent")
     store = store or Store(str(cfg.db_path))
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
+        # sqlite 连接不关的话，Windows 上 agent.db 会一直被占着，删不掉也移不走。
+        # agent 跑在 daemon 线程里，进程退出时它可能还握着这个 store——但那条线
+        # 走到底也只是写失败，比让文件一直被占住强。
+        store.close()
+
+    app = FastAPI(title="win-ai-agent", lifespan=lifespan)
     provider = provider or build_provider(cfg)
     the_llm = llm or LLMClient(cfg)
     sess = Session()
@@ -108,10 +118,13 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
                 {"steps": ev.get("steps") or [], "current": ev.get("current") or 0},
                 ensure_ascii=False))
         elif t == "tool":
+            # status 让回放能还原「这步被拒绝了」，不必再去看 content 的开头几个字
             store.add_message(sess.session_id, "tool", ev.get("result", ""),
-                              tool_calls=ev.get("name", ""))
+                              tool_calls=ev.get("name", ""),
+                              status="" if ev.get("ok", True) else "rejected")
         else:                                    # assistant / final
-            store.add_message(sess.session_id, t, ev.get("content", ""))
+            store.add_message(sess.session_id, t, ev.get("content", ""),
+                              status="" if ev.get("ok", True) else "error")
 
     def _work(goal: str):
         try:
@@ -124,7 +137,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         except Exception as e:
             # 走 _emit 而不是直接塞队列：不落库的话页面上闪一下就没了，
             # 下次打开回放的是数据库，用户根本不知道上次为什么没有结果。
-            _emit({"type": "final", "content": f"出错：{type(e).__name__}: {e}"})
+            _emit({"type": "final", "content": f"出错：{type(e).__name__}: {e}", "ok": False})
         finally:
             sess.pending = None
             sess.running = False
@@ -169,7 +182,8 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         s = store.latest_session()
         if not s:
             return {"title": "", "created_at": "", "messages": []}
-        msgs = [{"role": m["role"], "content": m["content"], "tool": m["tool_calls"] or ""}
+        msgs = [{"role": m["role"], "content": m["content"], "tool": m["tool_calls"] or "",
+                 "status": m["status"] or ""}
                 for m in store.get_messages(s["id"])]
         return {"title": s["title"], "created_at": s.get("created_at", ""), "messages": msgs}
 
