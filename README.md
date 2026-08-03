@@ -73,9 +73,17 @@ copy config.example.json config.json
 
 66 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
 
-分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 七个工具与注册表 ·
+分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 循环与上下文裁剪 ·
 `app/web/` FastAPI 与静态页。各层接口明确，可独立测试。
+
+八个工具：`list_dir` `read_file` `search_in_files` `web_search` `update_plan` `save_memory`
+（自动放行）、`write_file` `run_command`（过安全阀）。`fs.preview_write` 只给确认卡片生成
+diff，没有注册成工具，模型看不到它。
+
+**流程图**：[`docs/流程图.html`](docs/流程图.html) —— 分层依赖、任务时序（确认闸的线程阻塞）、
+`run_agent` 单步控制流、安全阀判定树。用浏览器打开，图表需要联网加载一次 mermaid；
+加载不出来时会原样显示图表源码。改代码后记得同步。
 
 ## 已知限制
 

@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>win-ai-agent 流程图</title>
+<style>
+:root{
+  --bg:#f4f6f8;--surface:#fff;--surface-2:#eceff3;--line:#d8dee6;--line-soft:#e6eaf0;
+  --text:#1b2027;--text-dim:#5d6874;--text-faint:#8b95a3;
+  --accent:#a9631c;--accent-soft:#fbf1e2;
+  --ok:#2c7a4b;--danger:#ad3227;--info:#2f5b78;
+  --plate:#fbfcfd;--plate-line:#dde3ea;--plate-ink:#26313b;
+  --mono:"Cascadia Mono","Cascadia Code",Consolas,ui-monospace,monospace;
+  --sans:"Segoe UI",system-ui,"Microsoft YaHei","PingFang SC",sans-serif;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#11141a;--surface:#181c23;--surface-2:#20262f;--line:#2b323d;--line-soft:#242a33;
+  --text:#dfe4ea;--text-dim:#8d97a5;--text-faint:#69737f;
+  --accent:#dfa257;--accent-soft:#2a2217;
+  --ok:#5fb480;--danger:#e0736a;--info:#74a7cb;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
+  font-size:15px;line-height:1.62;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:30px 20px 72px}
+
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--text-faint);margin:0 0 8px}
+h1{font-size:clamp(24px,3.4vw,32px);line-height:1.2;margin:0 0 12px;font-weight:640;letter-spacing:-.015em}
+.lede{margin:0 0 8px;color:var(--text-dim);max-width:64ch}
+code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:1px 5px;border-radius:3px}
+
+.offline{margin:16px 0 0;padding:9px 13px;border-radius:7px;border:1px solid var(--accent);
+  background:var(--accent-soft);font-size:13px;color:var(--text)}
+.offline.gone{display:none}
+
+section{margin-top:38px}
+h2{font-size:19px;font-weight:620;margin:0 0 6px;letter-spacing:-.01em;
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+h2 .num{font-family:var(--mono);font-size:12px;color:var(--accent);letter-spacing:.08em;flex:none}
+h2 .src{font-family:var(--mono);font-size:11.5px;color:var(--text-faint);font-weight:400;margin-left:auto}
+section>p{margin:0 0 14px;color:var(--text-dim);max-width:66ch}
+
+/* 图版在两种主题下都保持浅底：mermaid 默认配色在深色背景上会糊 */
+.plate{background:var(--plate);border:1px solid var(--plate-line);border-radius:9px;
+  padding:18px 14px;overflow-x:auto;color:var(--plate-ink)}
+pre.mermaid{margin:0;font-family:var(--mono);font-size:12px;line-height:1.5;
+  white-space:pre;text-align:left;color:var(--plate-ink)}
+pre.mermaid[data-processed="true"]{display:flex;justify-content:center;font-size:inherit}
+
+.read{margin-top:12px;border-left:2px solid var(--accent);padding:2px 0 2px 13px;
+  font-size:13.5px;color:var(--text-dim)}
+.read b{color:var(--text);font-weight:600}
+
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13.5px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--text-faint);font-weight:600;border-bottom-color:var(--line)}
+td:first-child{font-family:var(--mono);font-size:12.5px;white-space:nowrap;color:var(--info)}
+
+.gap{margin-top:44px;border:1px solid var(--line);border-radius:9px;background:var(--surface);padding:16px 18px}
+.gap h3{margin:0 0 10px;font-size:15px;font-weight:620}
+.gap ul{margin:0;padding-left:18px;color:var(--text-dim);font-size:13.5px}
+.gap li{margin:5px 0}
+.gap li b{color:var(--text)}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--text-faint);font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="eyebrow">win-ai-agent · 按 main 分支代码绘制</p>
+<h1>流程图</h1>
+<p class="lede">
+  设计文档里只有两段 ASCII 示意，停在"收到目标 → 规划 → 执行 → 反思"这一层。
+  下面四张按实际代码画，每张标了对应的源文件位置。
+</p>
+
+<div class="offline" id="offline">
+  图表由 mermaid 渲染，需要联网加载一次脚本。若下方显示的是文本源码，说明脚本没加载成功——
+  源码本身仍然可读，或贴进 <code>mermaid.live</code> 查看。
+</div>
+
+<section>
+  <h2><span class="num">01</span>分层与依赖<span class="src">app/</span></h2>
+  <p>箭头是"谁调用谁"。安全阀被<b>两处</b>调用——沙箱在工具层拦路径，白名单在循环里拦命令。</p>
+  <div class="plate">
+<pre class="mermaid">
+graph TD
+  BAT["启动.bat"] --> MAIN["main.py<br/>find_free_port · 开浏览器"]
+  MAIN --> SRV["web/server.py<br/>send · poll · approve"]
+  SRV --> LOOP["agent/loop.py<br/>run_agent"]
+  SRV --> STORE["store/db.py<br/>会话 · 消息 · 记忆"]
+  LOOP --> CTX["agent/context.py<br/>trim_history"]
+  LOOP --> PROMPT["agent/prompt.py<br/>system_prompt"]
+  LOOP --> LLM["llm/client.py<br/>OpenAI 兼容"]
+  LOOP --> REG["tools/registry.py<br/>schema · execute"]
+  LOOP -. 白名单 .-> CMD["safety/commands.py"]
+  REG --> FS["tools/fs.py"]
+  REG --> SH["tools/shell.py"]
+  REG --> WEB["tools/web.py"]
+  REG --> STORE
+  FS -. 沙箱 .-> SB["safety/sandbox.py"]
+  LLM --> API(["千问 DashScope"])
+  WEB --> DDG(["DuckDuckGo"])
+
+  classDef entry fill:#fdf1e0,stroke:#c79245,color:#3a2a12
+  classDef safety fill:#fbeceb,stroke:#c76a60,color:#3d1a17
+  classDef ext fill:#eef2f6,stroke:#9fb0c0,color:#26313b,stroke-dasharray:4 3
+  class BAT,MAIN entry
+  class CMD,SB safety
+  class API,DDG ext
+</pre>
+  </div>
+  <div class="read"><b>读法：</b>红色是两道安全阀，虚线表示"被查询"而非"被编排"。外部依赖只有两个，都可替换。</div>
+</section>
+
+<section>
+  <h2><span class="num">02</span>一次任务的完整时序<span class="src">server.py + loop.py</span></h2>
+  <p>这张最关键——它说明了<b>确认闸到底是什么</b>：agent 线程真的阻塞在 <code>threading.Event.wait()</code> 上，页面轮询看到 <code>pending</code> 才画出闸口，用户点确认才把线程放行。</p>
+  <div class="plate">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as 浏览器
+  participant F as FastAPI 主线程
+  participant S as Session
+  participant A as Agent 后台线程
+  participant M as 千问
+  participant T as 工具层
+
+  B->>F: POST /send goal
+  F->>S: start 抢运行权
+  Note over S: 已在跑则返回 409
+  F->>A: 起后台线程
+  F-->>B: 200 ok
+
+  loop 每 1 秒
+    B->>F: GET /poll
+    F-->>B: events pending plan running
+  end
+
+  A->>M: chat messages 加 schemas
+  M-->>A: tool_calls 为 write_file
+  A->>S: confirm 带 diff 预览
+  Note over A: 阻塞在 Event.wait
+
+  B->>F: GET /poll
+  F-->>B: pending 非空
+  Note over B: 流里画出橙色闸口
+  B->>F: POST /approve ok=true
+  F->>S: resolve 触发 Event.set
+  S-->>A: 返回 True
+
+  A->>T: execute write_file
+  T-->>A: 已写入 并逐代备份
+  A->>A: 熔断计数 加 压缩 arguments
+  A->>M: chat 带上工具结果
+  M-->>A: content 且无 tool_calls
+  A->>S: emit final
+  A->>S: running 置 False
+  B->>F: GET /poll
+  F-->>B: final 事件
+</pre>
+  </div>
+  <div class="read"><b>读法：</b>第 12~18 步之间 agent 线程是<b>停住</b>的，FastAPI 主线程照常响应轮询。这就是把确认画成"流里的闸"而不是浮层弹窗的原因。</div>
+</section>
+
+<section>
+  <h2><span class="num">03</span>run_agent 单步控制流<span class="src">agent/loop.py:54-100</span></h2>
+  <p>循环体上限 20 次。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
+  <div class="plate">
+<pre class="mermaid">
+flowchart TD
+  START([收到目标]) --> INIT["messages 等于 system_prompt 加 user goal"]
+  INIT --> LOOP{"step 未超 max_steps"}
+  LOOP -->|否| MAXOUT["emit final 已达最大步数"]
+  LOOP -->|是| TRIM["trim_history<br/>按 assistant 加其 tool 响应 整组裁剪"]
+  TRIM --> STEP["emit step<br/>n / max / chars"]
+  STEP --> CHAT["llm.chat"]
+  CHAT --> HASCALL{"有 tool_calls"}
+  HASCALL -->|没有| FINAL["emit final 返回回答"]
+  HASCALL -->|有| APPEND["把 assistant.tool_calls 写进历史<br/>OpenAI 协议要求"]
+  APPEND --> EACH["逐个处理 tool_call"]
+  EACH --> NEEDC{"需要确认"}
+  NEEDC -->|是| WAIT["confirm 阻塞等前端"]
+  WAIT --> OKQ{"用户放行"}
+  OKQ -->|否| SKIP["result 为 用户拒绝了该操作"]
+  OKQ -->|是| EXEC
+  NEEDC -->|否| EXEC["tools.execute<br/>异常转成错误字符串"]
+  EXEC --> COUNT["按 工具加参数加结果 计数"]
+  COUNT --> ABORT{"次数达到 3"}
+  ABORT -->|是| DEAD["emit final 判定死循环 终止"]
+  ABORT -->|否| NUDGE{"次数等于 2"}
+  NUDGE -->|是| HINT["结果后追加系统提示<br/>别重复 换方法"]
+  NUDGE -->|否| EMIT
+  HINT --> EMIT["emit plan 或 tool"]
+  SKIP --> EMIT
+  EMIT --> MORE{"还有 tool_call"}
+  MORE -->|有| EACH
+  MORE -->|没有| SHRINK["_shrink_tool_args<br/>压掉已执行完的超长参数"]
+  SHRINK --> LOOP
+
+  classDef guard fill:#fdf1e0,stroke:#c79245,color:#3a2a12
+  classDef stop fill:#fbeceb,stroke:#c76a60,color:#3d1a17
+  classDef done fill:#e9f4ed,stroke:#4d9a6c,color:#173423
+  class TRIM,COUNT,SHRINK,HINT guard
+  class DEAD,MAXOUT stop
+  class FINAL done
+</pre>
+  </div>
+  <div class="read"><b>读法：</b>橙色是三处护栏。熔断按<b>「工具 + 参数 + 结果」</b>计数而不是按异常——工具失败时大多返回错误字符串，只数异常几乎永远不触发。</div>
+</section>
+
+<section>
+  <h2><span class="num">04</span>安全阀判定<span class="src">safety/commands.py + sandbox.py</span></h2>
+  <p>命令用<b>只读白名单</b>而不是危险名单——危险名单拦不住 <code>dir &amp;&amp; del /f /s /q *</code> 这类组合，两天做不出可靠的命令解析器，所以反着做。</p>
+  <div class="plate">
+<pre class="mermaid">
+flowchart TD
+  IN([工具调用]) --> W{"是 write_file"}
+  W -->|是| CONF["需要确认<br/>先给 diff 预览"]
+  W -->|否| R{"是 run_command"}
+  R -->|否| PASS["自动放行<br/>list_dir · read_file · search_in_files<br/>web_search · update_plan · save_memory"]
+  R -->|是| META{"含 shell 元字符或换行"}
+  META -->|含| CONF
+  META -->|不含| ARG{"参数越界<br/>上跳 或 盘符 或 绝对路径"}
+  ARG -->|越界| CONF
+  ARG -->|没有| HEAD{"首个 token 在白名单"}
+  HEAD -->|"dir ls type cat pwd echo whoami"| PASS2["自动放行"]
+  HEAD -->|"git status / diff / log"| PASS2
+  HEAD -->|"python 或 pip 的版本与 list"| PASS2
+  HEAD -->|其它| CONF
+
+  PASS --> SB
+  PASS2 --> SB["路径类工具再过一道沙箱<br/>resolve 加 commonpath<br/>越界抛 SandboxError"]
+  CONF --> GATE(["页面弹确认闸<br/>确认 / 拒绝"])
+
+  classDef gate fill:#fdf1e0,stroke:#c79245,color:#3a2a12
+  classDef ok fill:#e9f4ed,stroke:#4d9a6c,color:#173423
+  class CONF,GATE gate
+  class PASS,PASS2 ok
+</pre>
+  </div>
+  <div class="read">
+    <b>读法：</b>元字符表是 <code>&amp;&amp;</code>、<code>||</code>、<code>|</code>、<code>;</code>、<code>&gt;</code>、<code>&lt;</code>、<code>&amp;</code>、反引号、<code>$(</code>，
+    以及<b>换行与回车</b>——少了后两个，<code>dir\ndel x</code> 会被判为只读直接放行。参数里的 <code>..</code> 也要拦：
+    <code>run_command</code> 不经过沙箱，白名单里的 <code>type</code>/<code>cat</code> 否则能读到工作目录之外。
+  </div>
+</section>
+
+<section>
+  <h2><span class="num">05</span>事件类型对照<span class="src">loop.py emit → /poll → index.html</span></h2>
+  <p>后端只往队列里塞这五种事件，页面按类型渲染。加一种新事件只需改这三处。</p>
+  <table>
+    <thead><tr><th>type</th><th>字段</th><th>页面表现</th></tr></thead>
+    <tbody>
+      <tr><td>step</td><td>n · max · chars</td><td>顶部步数、右栏上下文占用条</td></tr>
+      <tr><td>assistant</td><td>content</td><td>🤖 思考文本</td></tr>
+      <tr><td>plan</td><td>steps[]</td><td>右栏计划面板 + 一张 update_plan 卡片</td></tr>
+      <tr><td>tool</td><td>name · result</td><td>⚙ 工具卡片，拒绝时标红</td></tr>
+      <tr><td>final</td><td>content</td><td>✅ 绿框收尾（出错时为红框）</td></tr>
+    </tbody>
+  </table>
+  <div class="read"><b>注意：</b><code>pending</code> 不走事件队列——它是 <code>/poll</code> 的独立字段，因为确认是<b>状态</b>不是<b>事件</b>：页面刷新后闸口必须还在。</div>
+</section>
+
+<div class="gap">
+  <h3>这几张图和设计文档差在哪</h3>
+  <ul>
+    <li><b>文档 §3 的"完整循环"</b>只有规划 → 执行 → 反思三步，没有熔断、上下文裁剪、参数压缩——这些都是后来补进 §13 健壮性护栏的，但从没画进流程。</li>
+    <li><b>确认闸的阻塞语义在文档里完全看不出来。</b>§9 只说"后端进入待确认状态"，没说清是哪个线程停住、谁在等谁。这是图 02 存在的理由。</li>
+    <li><b>反思在图里是隐形的。</b>文档把"出错→反思→重试"画成一个环，但代码里没有对应分支——它靠的是把错误字符串喂回历史 + system prompt 第 3 条，模型自己决定要不要换方法。图 03 里那个"追加系统提示"是唯一一处代码层面的强制反思。</li>
+  </ul>
+</div>
+
+<footer>docs/流程图.html · 改代码后记得同步这里</footer>
+</div>
+
+<script type="module">
+  try {
+    const mermaid = (await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')).default;
+    mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });
+    await mermaid.run();
+    document.getElementById('offline').classList.add('gone');
+  } catch (e) {
+    console.warn('mermaid 未能加载，下方显示图表源码：', e);
+  }
+</script>
+</body>
+</html>
