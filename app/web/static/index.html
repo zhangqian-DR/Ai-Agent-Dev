@@ -168,6 +168,16 @@ function setCtx(chars){
   ctxBar.style.width=pct+'%';ctxBar.className=pct>70?'warn':'';
 }
 
+// 面板没有计划时的占位。一直显示"等待任务"会让人以为坏了——
+// 模型对咨询类问题本来就不该出计划。
+function planNote(text){
+  planEl.innerHTML='';
+  var li=el('li');
+  li.appendChild(el('span','mark','·'));
+  li.appendChild(el('span','label',text));
+  planEl.appendChild(li);
+}
+
 function renderPlan(steps,activeIdx){
   if(!steps||!steps.length){return;}
   lastPlan=steps;planEl.innerHTML='';
@@ -244,6 +254,7 @@ function handle(e){
     var bad=(e.content||'').indexOf('出错：')===0;
     msg(bad?'err':'final',bad?'✖':'✅',e.content);
     if(lastPlan.length)renderPlan(lastPlan,lastPlan.length);
+    else planNote('本次无需计划');
   }
 }
 
@@ -252,6 +263,7 @@ function send(){
   if(!v)return;
   msg('user','你',v);
   goal.value='';
+  lastPlan=[];planDone=0;planNote('规划中…');   // 上一轮的计划不能留到下一轮
   fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:v})})
     .then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});})
     .then(function(x){if(x.s!==200)say(x.j.error||('发送失败 '+x.s));})

@@ -121,6 +121,23 @@ def test_poll_exposes_plan_and_env(tmp_path):
     assert d["plan"] == [] and d["running"] is False
 
 
+def test_default_provider_follows_config(tmp_path):
+    """不显式传 provider 时必须按 config 的 search_provider 建。
+    之前所有用例都传 FakeProvider，默认这条路一次都没跑过，
+    结果 server.py 里硬编码的 DuckDuckGoProvider 一直没被换掉。"""
+    from app.tools.web import DashScopeProvider, DuckDuckGoProvider
+
+    cfg = Config("http://x", "k", "qwen-max", tmp_path, db_path=_db(tmp_path),
+                 search_provider="dashscope")
+    app = create_app(cfg, llm=ListDirLLM(), store=Store(str(_db(tmp_path))))
+    assert isinstance(app.state.provider, DashScopeProvider)
+
+    cfg2 = Config("http://x", "k", "qwen-max", tmp_path, db_path=_db(tmp_path),
+                  search_provider="duckduckgo")
+    app2 = create_app(cfg2, llm=ListDirLLM(), store=Store(str(_db(tmp_path))))
+    assert isinstance(app2.state.provider, DuckDuckGoProvider)
+
+
 def test_index_page_is_served(tmp_path):
     """静态页要真能被托管出去，否则打开浏览器是 404。"""
     client = TestClient(_app(tmp_path, ListDirLLM()))

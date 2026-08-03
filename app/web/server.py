@@ -12,7 +12,7 @@ from app.agent.loop import run_agent
 from app.llm.client import LLMClient
 from app.store.db import Store
 from app.tools.registry import build_tools
-from app.tools.web import DuckDuckGoProvider
+from app.tools.web import build_provider
 
 _STATIC = Path(__file__).parent / "static"
 
@@ -64,9 +64,10 @@ class Session:
 def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     app = FastAPI(title="win-ai-agent")
     store = store or Store(str(cfg.db_path))
-    provider = provider or DuckDuckGoProvider()
+    provider = provider or build_provider(cfg)
     the_llm = llm or LLMClient(cfg)
     sess = Session()
+    app.state.provider = provider          # 让测试能验证默认这条路建对了没
 
     def _emit(ev: dict):
         t = ev.get("type")
