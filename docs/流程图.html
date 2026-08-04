@@ -91,13 +91,16 @@ footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);
 graph TD
   BAT["启动.bat"] --> MAIN["main.py<br/>find_free_port · 开浏览器"]
   MAIN --> SRV["web/server.py<br/>send · poll · approve"]
-  SRV --> LOOP["agent/loop.py<br/>run_agent"]
+  SRV --> RUN["agent/loop.py<br/>AgentRunner · start / resume"]
   SRV --> STORE["store/db.py<br/>会话 · 消息 · 记忆"]
-  LOOP --> CTX["agent/context.py<br/>trim_history"]
-  LOOP --> PROMPT["agent/prompt.py<br/>system_prompt"]
-  LOOP --> LLM["llm/client.py<br/>OpenAI 兼容"]
-  LOOP --> REG["tools/registry.py<br/>schema · execute"]
-  LOOP -. 白名单 .-> CMD["safety/commands.py"]
+  SRV --> CKPT[("agent.checkpoints.sqlite<br/>SqliteSaver")]
+  RUN --> GRAPH["StateGraph<br/>agent ⇄ tools"]
+  GRAPH --> CTX["agent/context.py<br/>trim_history"]
+  GRAPH --> PROMPT["agent/prompt.py<br/>system_prompt"]
+  GRAPH --> LLM["llm/client.py<br/>ChatOpenAI 薄封装"]
+  GRAPH --> REG["tools/registry.py<br/>LangChain 工具对象"]
+  GRAPH -. 白名单 .-> CMD["safety/commands.py"]
+  RUN -. 存/取 .-> CKPT
   REG --> FS["tools/fs.py"]
   REG --> SH["tools/shell.py"]
   REG --> WEB["tools/web.py"]
@@ -111,7 +114,7 @@ graph TD
   classDef ext fill:#eef2f6,stroke:#9fb0c0,color:#26313b,stroke-dasharray:4 3
   class BAT,MAIN entry
   class CMD,SB safety
-  class API,DDG ext
+  class API,DDG,CKPT ext
 </pre>
   </div>
   <div class="read"><b>读法：</b>红色是两道安全阀，虚线表示"被查询"而非"被编排"。外部依赖只有两个，都可替换。</div>
@@ -119,7 +122,7 @@ graph TD
 
 <section>
   <h2><span class="num">02</span>一次任务的完整时序<span class="src">server.py + loop.py</span></h2>
-  <p>这张最关键——它说明了<b>确认闸到底是什么</b>：agent 线程真的阻塞在 <code>threading.Event.wait()</code> 上，页面轮询看到 <code>pending</code> 才画出闸口，用户点确认才把线程放行。</p>
+  <p>这张最关键——它说明了<b>确认闸到底是什么</b>：图跑到闸前<b>存 checkpoint 然后返回</b>，后台线程就此结束。等待确认期间<b>没有任何线程挂着</b>；用户点确认后，另起一个线程用 <code>Command(resume=…)</code> 从 checkpoint 接着跑。</p>
   <div class="plate">
 <pre class="mermaid">
 sequenceDiagram
@@ -127,91 +130,97 @@ sequenceDiagram
   participant B as 浏览器
   participant F as FastAPI 主线程
   participant S as Session
-  participant A as Agent 后台线程
-  participant M as 千问
+  participant A as 驱动线程 一
+  participant G as StateGraph 加 SqliteSaver
+  participant A2 as 驱动线程 二
   participant T as 工具层
 
   B->>F: POST /send goal
   F->>S: start 抢运行权
-  Note over S: 已在跑则返回 409
-  F->>A: 起后台线程
+  Note over S: 已在跑则 409 含等待确认
+  F->>A: 起线程 runner.start
   F-->>B: 200 ok
 
-  loop 每 1 秒
-    B->>F: GET /poll
-    F-->>B: events pending plan running
-  end
-
-  A->>M: chat messages 加 schemas
-  M-->>A: tool_calls 为 write_file
-  A->>S: confirm 带 diff 预览
-  Note over A: 阻塞在 Event.wait
+  A->>G: invoke thread_id 等于 session_id
+  Note over G: agent 节点 调模型
+  Note over G: tools 节点 先算预览 再 interrupt
+  G-->>A: 返回 __interrupt__ 存好 checkpoint
+  A->>S: set_pending 带递增 id
+  Note over A: 线程结束 没有阻塞
 
   B->>F: GET /poll
   F-->>B: pending 非空
-  Note over B: 流里画出橙色闸口
+  Note over B: 流里画出橙色闸口 整批一张卡
   B->>F: POST /approve ok=true
-  F->>S: resolve 触发 Event.set
-  S-->>A: 返回 True
+  F->>S: take_wheel 挡连点
+  F->>A2: 起线程 runner.resume
+  F-->>B: 200 ok
 
-  A->>T: execute write_file
-  T-->>A: 已写入 并逐代备份
-  A->>A: 熔断计数 加 压缩 arguments
-  A->>M: chat 带上工具结果
-  M-->>A: content 且无 tool_calls
-  A->>S: emit final
-  A->>S: running 置 False
+  A2->>G: invoke Command resume 等于 True
+  Note over G: tools 节点从头重跑<br/>interrupt 直接返回 True 不再中断
+  G->>T: execute write_file
+  T-->>G: 已写入 并逐代备份
+  Note over G: 熔断计数 加 压缩参数
+  Note over G: agent 节点 无 tool_calls
+  G-->>A2: 结束
+  A2->>S: emit final 加 running 置 False
+  A2->>G: delete_thread 清掉本轮 checkpoint
   B->>F: GET /poll
   F-->>B: final 事件
 </pre>
   </div>
-  <div class="read"><b>读法：</b>第 12~18 步之间 agent 线程是<b>停住</b>的，FastAPI 主线程照常响应轮询。这就是把确认画成"流里的闸"而不是浮层弹窗的原因。</div>
+  <div class="read"><b>读法：</b>两条驱动线程<b>互不重叠</b>——第一条在闸前就退出了。这正是换成 <code>interrupt</code> 换回来的东西：关掉页面不会挂住任何东西，隔多久回来那道闸都还在。<br/>注意第 18 步：恢复时 <b>tools 节点整个从头重跑</b>，所以闸必须在任何副作用之前、且一轮只有一个——这就是"一轮里的危险操作合成一张卡"的由来。</div>
 </section>
 
 <section>
-  <h2><span class="num">03</span>run_agent 单步控制流<span class="src">agent/loop.py:54-100</span></h2>
-  <p>循环体上限 20 次。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
+  <h2><span class="num">03</span>图的两个节点<span class="src">agent/loop.py build_graph</span></h2>
+  <p><code>recursion_limit</code> 等于 <code>max_steps × 2</code>——它数的是<b>节点执行次数</b>，一个 ReAct 回合是 agent 加 tools 两个节点。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
   <div class="plate">
 <pre class="mermaid">
 flowchart TD
-  START([收到目标]) --> INIT["messages 等于 system_prompt 加 user goal"]
-  INIT --> LOOP{"step 未超 max_steps"}
-  LOOP -->|否| MAXOUT["emit final 已达最大步数"]
-  LOOP -->|是| TRIM["trim_history<br/>按 assistant 加其 tool 响应 整组裁剪"]
-  TRIM --> STEP["emit step<br/>n / max / chars"]
-  STEP --> CHAT["llm.chat"]
+  START([START]) --> AG
+
+  subgraph AGENT["agent 节点"]
+    AG["trim_history<br/>只为这次调用裁 state 留全量"] --> STEP["emit step<br/>n / max / chars"]
+    STEP --> CHAT["llm.chat<br/>tool_calls 加 invalid_tool_calls 都要读"]
+  end
+
   CHAT --> HASCALL{"有 tool_calls"}
-  HASCALL -->|没有| FINAL["emit final 返回回答"]
-  HASCALL -->|有| APPEND["把 assistant.tool_calls 写进历史<br/>OpenAI 协议要求"]
-  APPEND --> EACH["逐个处理 tool_call"]
-  EACH --> NEEDC{"需要确认"}
-  NEEDC -->|是| WAIT["confirm 阻塞等前端"]
-  WAIT --> OKQ{"用户放行"}
-  OKQ -->|否| SKIP["result 为 用户拒绝了该操作"]
-  OKQ -->|是| EXEC
-  NEEDC -->|否| EXEC["tools.execute<br/>异常转成错误字符串"]
-  EXEC --> COUNT["按 工具加参数加结果 计数"]
-  COUNT --> ABORT{"次数达到 3"}
-  ABORT -->|是| DEAD["emit final 判定死循环 终止"]
-  ABORT -->|否| NUDGE{"次数等于 2"}
-  NUDGE -->|是| HINT["结果后追加系统提示<br/>别重复 换方法"]
-  NUDGE -->|否| EMIT
-  HINT --> EMIT["emit plan 或 tool"]
-  SKIP --> EMIT
-  EMIT --> MORE{"还有 tool_call"}
-  MORE -->|有| EACH
-  MORE -->|没有| SHRINK["_shrink_tool_args<br/>压掉已执行完的超长参数"]
-  SHRINK --> LOOP
+  HASCALL -->|没有| FINAL["emit final → END"]
+  HASCALL -->|有| GATEQ
+
+  subgraph TOOLS["tools 节点 —— 恢复时整个从头重跑"]
+    GATEQ{"这一轮有要确认的吗"} -->|有| PREV["逐个算预览<br/>不能有副作用"]
+    PREV --> ITR["interrupt 整批一次<br/>图在这里停住并返回"]
+    ITR -.->|"Command resume"| APPR{"用户放行"}
+    GATEQ -->|没有| EXEC
+    APPR -->|否| SKIP["过闸的记 用户拒绝了该操作<br/>自动放行的照常执行"]
+    APPR -->|是| EXEC["tools.execute<br/>异常转成错误字符串"]
+    SKIP --> COUNT
+    EXEC --> COUNT["两把尺子<br/>同参同果累计 加 同参连续"]
+    COUNT --> ABORT{"达到 3"}
+    ABORT -->|是| DEAD["emit final 判定死循环 → END"]
+    ABORT -->|否| NUDGE{"等于 2"}
+    NUDGE -->|是| HINT["结果后追加系统提示<br/>别重复 换方法"]
+    NUDGE -->|否| EMIT
+    HINT --> EMIT["emit plan 或 tool"]
+    EMIT --> MORE{"还有 tool_call"}
+    MORE -->|有| EXEC
+    MORE -->|没有| SHRINK["_shrink_tool_args<br/>同 id 写回 state"]
+  end
+
+  SHRINK --> AG
+  MAXOUT["超出 recursion_limit<br/>捕获后 emit final 已达最大步数"]
 
   classDef guard fill:#fdf1e0,stroke:#c79245,color:#3a2a12
   classDef stop fill:#fbeceb,stroke:#c76a60,color:#3d1a17
   classDef done fill:#e9f4ed,stroke:#4d9a6c,color:#173423
-  class TRIM,COUNT,SHRINK,HINT guard
+  class AG,COUNT,SHRINK,HINT,PREV guard
   class DEAD,MAXOUT stop
   class FINAL done
 </pre>
   </div>
-  <div class="read"><b>读法：</b>橙色是三处护栏。熔断按<b>「工具 + 参数 + 结果」</b>计数而不是按异常——工具失败时大多返回错误字符串，只数异常几乎永远不触发。</div>
+  <div class="read"><b>读法：</b>橙色是护栏。熔断用<b>两把尺子</b>：同参同果<b>累计</b>抓交替死循环，同参<b>连续</b>抓 <code>run_command</code> 那种输出带时间戳、逐字比对永远不相等的情况。<br/><code>interrupt</code> 那一格是虚线回边：第一次抛出让图返回，恢复时<b>整个节点重跑</b>而这一行直接返回放行结果——所以它上面只能算预览，动手必须在它下面。</div>
 </section>
 
 <section>
@@ -260,19 +269,20 @@ flowchart TD
       <tr><td>step</td><td>n · max · chars</td><td>顶部步数、右栏上下文占用条</td></tr>
       <tr><td>assistant</td><td>content</td><td>🤖 思考文本</td></tr>
       <tr><td>plan</td><td>steps[]</td><td>右栏计划面板 + 一张 update_plan 卡片</td></tr>
-      <tr><td>tool</td><td>name · result</td><td>⚙ 工具卡片，拒绝时标红</td></tr>
-      <tr><td>final</td><td>content</td><td>✅ 绿框收尾（出错时为红框）</td></tr>
+      <tr><td>tool</td><td>name · result · <b>ok</b></td><td>⚙ 工具卡片，<code>ok=false</code> 时标红</td></tr>
+      <tr><td>final</td><td>content · <b>ok</b></td><td>✅ 绿框收尾，<code>ok=false</code> 时红框</td></tr>
     </tbody>
   </table>
-  <div class="read"><b>注意：</b><code>pending</code> 不走事件队列——它是 <code>/poll</code> 的独立字段，因为确认是<b>状态</b>不是<b>事件</b>：页面刷新后闸口必须还在。</div>
+  <div class="read"><b>注意：</b><code>pending</code> 不走事件队列——它是 <code>/poll</code> 的独立字段，因为确认是<b>状态</b>不是<b>事件</b>：页面刷新后闸口必须还在。载荷是 <code>{id, actions: [{name, preview}…]}</code>，一轮里的危险操作合成一张卡；<code>id</code> 递增，页面靠它判断"这张卡我画过没有"。<br/><code>ok</code> 是结构化标志，不是从文案开头猜的——不然模型正常回答只要以"出错："开头就会被渲染成错误。落库时对应 <code>messages.status</code>（<code>error</code> / <code>rejected</code>），回放才还原得出来。</div>
 </section>
 
 <div class="gap">
   <h3>这几张图和设计文档差在哪</h3>
   <ul>
     <li><b>文档 §3 的"完整循环"</b>只有规划 → 执行 → 反思三步，没有熔断、上下文裁剪、参数压缩——这些都是后来补进 §13 健壮性护栏的，但从没画进流程。</li>
-    <li><b>确认闸的阻塞语义在文档里完全看不出来。</b>§9 只说"后端进入待确认状态"，没说清是哪个线程停住、谁在等谁。这是图 02 存在的理由。</li>
+    <li><b>确认闸的语义在文档里完全看不出来。</b>§9 只说"后端进入待确认状态"，没说清停在哪、谁在等谁。这是图 02 存在的理由——而它的答案已经变了一次：早期是 agent 线程阻塞在 <code>threading.Event.wait()</code> 上，现在是图存 checkpoint 后返回、<b>根本没有线程在等</b>。</li>
     <li><b>反思在图里是隐形的。</b>文档把"出错→反思→重试"画成一个环，但代码里没有对应分支——它靠的是把错误字符串喂回历史 + system prompt 第 3 条，模型自己决定要不要换方法。图 03 里那个"追加系统提示"是唯一一处代码层面的强制反思。</li>
+    <li><b>文档完全没有 LangGraph。</b>它写的是手写 for 循环。现在循环由 <code>StateGraph</code> 驱动、确认闸由 <code>interrupt</code> 加 <code>SqliteSaver</code> 实现，这几张图是<b>以代码为准</b>重画的。</li>
   </ul>
 </div>
 
