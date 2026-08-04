@@ -195,7 +195,8 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             sess.runner = DirectRunner(llm=llms[sess.path], cfg=cfg, emit=_emit)
         else:
             sess.runner = AgentRunner(llm=llms[sess.path], tools=build_tools(cfg, store, provider),
-                                      cfg=cfg, emit=_emit, checkpointer=checkpointer)
+                                      cfg=cfg, emit=_emit, checkpointer=checkpointer,
+                                      path=sess.path)
         thread_id = str(sess.session_id)
         # 只注入最近 N 条：全部记忆是每轮都拼进 system prompt 的，不设上限会一直膨胀。
         # /memories 面板仍然显示全部——限的是注入，不是数据。

@@ -49,6 +49,7 @@ class AgentState(TypedDict):
     # 这一轮有没有真的动过东西（写文件、跑非只读命令）。只有动过才值得验收。
     touched: bool
     verify_rounds: int
+    verify_passed: bool
     # 非 None 就是收场了：熔断终止、模型层出错、或验收给出的结论
     final: Optional[str]
 
@@ -77,8 +78,32 @@ def _shrink_tool_args(msg, value_limit: int = _ARG_VALUE_LIMIT) -> None:
         msg.additional_kwargs.pop("tool_calls", None)
 
 
-def build_graph(*, llm, tools, cfg, emit, checkpointer):
-    """把两个节点接成图。所有外部依赖靠闭包带进去，节点本身只读写 state。"""
+# synth 用更大的窗口：它存在的理由就是通读全程。执行阶段每次调用都按默认预算
+# 裁剪，长任务里早期观察会被裁掉，收尾那句就成了「只看得见最近几步」的结论。
+_SYNTH_CHARS = 60_000
+
+# 计划要写**要弄清楚什么**，不是**调哪个工具**。写成工具级步骤的话，模型会照着
+# 一条条执行——实测出现过「列出所有文件 / 筛选 .py / 逐一读取」这样的计划，
+# 结果 list_dir 被调了三遍，比不做规划还慢。
+_PLAN_ASK = ("先别动手。用 update_plan 提交一份 2~4 条的调查提纲，current 填 1。\n"
+             "每条写**要弄清楚什么问题**，不要写调用哪个工具、也不要把「列目录」"
+             "「读文件」这种操作本身当成一步。只调这一个工具，不做别的。")
+
+_SYNTH_ASK = ("以上是完整的执行过程。现在把结论完整地写给用户：覆盖你实际看过的"
+              "全部材料，不要只总结最后几步；有没做到或没验证的地方要如实说明。"
+              "不要再调用任何工具。")
+
+
+def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
+    """把节点接成图。所有外部依赖靠闭包带进去，节点本身只读写 state。
+
+    ``path`` 决定两头：``slow`` 在开头加 planner、结尾加 synth，中间的执行完全
+    复用 ``agent ⇄ tools``——三道闸（确认、熔断、验收）因此自动生效，不必在新
+    节点里重接一遍。
+    """
+    is_slow = path == "slow"
+    # slow 路的收尾归 synth，fast 路直接结束
+    terminal = "synth" if is_slow else END
 
     def verify_due(state: AgentState) -> bool:
         """这一轮该不该跑验收命令。
@@ -111,10 +136,64 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
         # 两个都发的话页面上同一段话会显示两遍，数据库里也会存两条。
         if reply.content and calls:
             emit({"type": "assistant", "content": reply.content})
-        # 该验收时先不发 final——收没收场由 verify 节点说了算
-        if not calls and not verify_due(state):
+        # 该验收、或后面还有 synth 时先不发 final——收没收场由那边说了算
+        if not calls and not verify_due(state) and not is_slow:
             emit({"type": "final", "content": reply.content or "", "ok": True})
         return {"messages": [reply], "step": step}
+
+    def planner_node(state: AgentState) -> dict:
+        """先出计划再动手。
+
+        只绑 ``update_plan`` 一个工具——规划那一步不该让模型顺手就动起手来。
+        这样也不必新增「结构化输出」这条 LLM 接口：计划的形状本来就由
+        UpdatePlanArgs 这个 pydantic 模型定死了，而且产出直接进现成的计划面板。
+        模型不肯出计划也没关系，照样往下走：规划是加分项，不是必经关卡。
+        """
+        step = state["step"] + 1
+        plan_tool = [t for t in tools.tools() if t.name == "update_plan"]
+        msgs = trim_history(state["messages"]) + [HumanMessage(content=_PLAN_ASK)]
+        emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(msgs)})
+
+        try:
+            reply = llm.chat(msgs, plan_tool)
+        except Exception as e:
+            msg = f"出错：{explain(e)}"
+            emit({"type": "final", "content": msg, "ok": False})
+            return {"step": step, "final": msg}
+
+        out: list[Any] = []
+        plan, plan_current = state["plan"], state["plan_current"]
+        for c in parse_tool_calls(reply):
+            if c["name"] != "update_plan":
+                continue
+            try:
+                result = tools.execute(c["name"], c["args"])
+            except Exception as e:
+                result = f"工具执行出错：{explain(e)}"
+            plan, plan_current = tools.plan, tools.plan_current
+            emit({"type": "plan", "steps": plan, "current": plan_current})
+            out.append(ToolMessage(content=result, tool_call_id=c["id"]))
+        return {"messages": [reply, *out], "step": step,
+                "plan": plan, "plan_current": plan_current}
+
+    def synth_node(state: AgentState) -> dict:
+        """通读全程再写结论。
+
+        执行阶段每次调用都按默认预算裁剪，长任务里早期观察会被裁掉——收尾那句
+        因此常常是「只看得见最近几步」的结论。这里用大得多的窗口重看一遍。
+        不绑工具：这一步只要一段话，给了工具反而可能又跑去干活。
+        """
+        msgs = trim_history(state["messages"], max_chars=_SYNTH_CHARS) + \
+            [HumanMessage(content=_SYNTH_ASK)]
+        try:
+            reply = llm.chat(msgs, [])
+        except Exception as e:
+            msg = f"出错：{explain(e)}"
+            emit({"type": "final", "content": msg, "ok": False})
+            return {"final": msg}
+        answer = reply.content or ""
+        emit({"type": "final", "content": answer, "ok": True})
+        return {"messages": [reply], "final": answer}
 
     def tools_node(state: AgentState) -> dict:
         reply = state["messages"][-1]
@@ -212,6 +291,8 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
 
         said = state["messages"][-1].content or ""
         if ok:
+            if is_slow:                      # 后面还有 synth，别在这儿收场
+                return {"verify_rounds": rounds, "verify_passed": True}
             emit({"type": "final", "content": said, "ok": True})
             return {"verify_rounds": rounds, "final": said}
         if rounds >= cfg.max_verify_rounds:
@@ -238,9 +319,16 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
             return END
         if parse_tool_calls(state["messages"][-1]):
             return "tools"
-        return "verify" if verify_due(state) else END
+        return "verify" if verify_due(state) else terminal
 
     def after_verify(state: AgentState) -> str:
+        if state["final"] is not None:      # 已经收场：fast 路过了，或轮数用尽
+            return END
+        if state["verify_passed"]:          # slow 路过了，收尾交给 synth
+            return "synth"
+        return "agent"                      # 没过，回去接着修
+
+    def after_planner(state: AgentState) -> str:
         return END if state["final"] is not None else "agent"
 
     def after_tools(state: AgentState) -> str:
@@ -250,11 +338,21 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
     g.add_node("agent", agent_node)
     g.add_node("tools", tools_node)
     g.add_node("verify", verify_node)
-    g.add_edge(START, "agent")
+    # 分支表要跟着路径走：fast 路没有 synth 节点，映过去会在 compile 时报错
+    extra = {"synth": "synth"} if is_slow else {}
     g.add_conditional_edges("agent", after_agent,
-                            {"tools": "tools", "verify": "verify", END: END})
+                            {"tools": "tools", "verify": "verify", END: END, **extra})
     g.add_conditional_edges("tools", after_tools, {"agent": "agent", END: END})
-    g.add_conditional_edges("verify", after_verify, {"agent": "agent", END: END})
+    g.add_conditional_edges("verify", after_verify,
+                            {"agent": "agent", END: END, **extra})
+    if is_slow:
+        g.add_node("planner", planner_node)
+        g.add_node("synth", synth_node)
+        g.add_edge(START, "planner")
+        g.add_conditional_edges("planner", after_planner, {"agent": "agent", END: END})
+        g.add_edge("synth", END)
+    else:
+        g.add_edge(START, "agent")
     return g.compile(checkpointer=checkpointer)
 
 
@@ -266,10 +364,10 @@ class AgentRunner:
     这就是 LangGraph 换回来的东西：暂停/恢复是一个原语，确认闸只是它的触发器。
     """
 
-    def __init__(self, *, llm, tools, cfg, emit, checkpointer):
+    def __init__(self, *, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
         self.cfg, self.emit = cfg, emit
         self.graph = build_graph(llm=llm, tools=tools, cfg=cfg, emit=emit,
-                                 checkpointer=checkpointer)
+                                 checkpointer=checkpointer, path=path)
 
     def _config(self, thread_id: str) -> dict:
         # recursion_limit 数的是**节点执行次数**，不是模型轮次：一个 ReAct 回合是
@@ -285,7 +383,8 @@ class AgentRunner:
                          HumanMessage(content=goal)],
             "step": 0, "plan": [], "plan_current": 0,
             "counts": {}, "last_sig": None, "consecutive": 0,
-            "touched": False, "verify_rounds": 0, "final": None,
+            "touched": False, "verify_rounds": 0, "verify_passed": False,
+            "final": None,
         }
         return self._drive(init, thread_id)
 
@@ -308,7 +407,7 @@ class AgentRunner:
         return {"done": True, "answer": out["messages"][-1].content or ""}
 
 
-def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
+def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories, path: str = "fast") -> str:
     """一路跑到底，撞上确认闸就用 ``confirm`` 回调同步问一次。
 
     web 层**不用**这个——它要的是「停下来、把闸交给页面、稍后恢复」，直接使唤
@@ -316,7 +415,7 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
     写 start/resume 循环。
     """
     runner = AgentRunner(llm=llm, tools=tools, cfg=cfg, emit=emit,
-                         checkpointer=InMemorySaver())
+                         checkpointer=InMemorySaver(), path=path)
     r = runner.start(goal, memories, "local")
     while not r["done"]:
         r = runner.resume(confirm(r["pending"]), "local")
