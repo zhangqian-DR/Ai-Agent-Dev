@@ -120,11 +120,16 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-155 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+176 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·
 `app/web/` FastAPI 与静态页。各层接口明确，可独立测试。
+
+**错误分三类**（`app/agent/errors.py`）：可重试（限流 / 5xx / 网络）、可修正（参数不对 /
+路径越界，喂回去让模型自己修）、终止（key 无效 / 模型名不对，重试没有意义）。给用户的是
+一句能照着做的话，不是 `Error code: 401 - {'error': ...}`。认不出来的默认按"可修正"处理
+——把任务打死是更坏的默认。
 
 ReAct 循环由 **LangGraph 的 `StateGraph`** 驱动（`agent ⇄ tools` 一个环），模型层走
 `langchain-openai` 的 `ChatOpenAI`。工具是 LangChain 工具对象，模型看到的函数定义由

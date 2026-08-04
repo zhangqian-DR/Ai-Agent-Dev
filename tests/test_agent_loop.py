@@ -154,6 +154,54 @@ def test_rejecting_the_gate_skips_only_the_gated_calls(tmp_path):
     assert not (tmp_path / "b.txt").exists()
 
 
+class _Boom:
+    """调用模型时抛一个带 status_code 的错，模仿 SDK 的行为。"""
+
+    def __init__(self, code):
+        self.code = code
+        self.n = 0
+
+    def chat(self, messages, tools):
+        self.n += 1
+        e = RuntimeError("Error code: %s - {'error': {'message': 'nope'}}" % self.code)
+        e.status_code = self.code
+        raise e
+
+
+def test_terminal_model_error_ends_cleanly_with_actionable_text(tmp_path):
+    """key 无效时要给一句能照着做的话，而不是把 SDK 的原始报文糊到页面上。
+
+    原来这个异常会一路冒到 web 层，变成
+    「出错：RuntimeError: Error code: 401 - {'error': {...}}」——用户看不出
+    该去改什么，只会一遍遍重发。
+    """
+    llm = _Boom(401)
+    ans, events = _run(tmp_path, llm)
+
+    assert "api_key" in ans and "config.json" in ans
+    assert "{'error'" not in ans, "不该把原始报文糊出来"
+    final = [e for e in events if e["type"] == "final"][-1]
+    assert final["ok"] is False, "这是错误收场，页面要标红"
+    assert llm.n == 1, "终止类错误不该再试第二次"
+
+
+def test_retryable_model_error_says_it_may_work_later(tmp_path):
+    """限流和 key 无效得说得不一样：一个值得稍后再来，一个改配置才行。"""
+    ans, _ = _run(tmp_path, _Boom(429))
+
+    assert "稍后" in ans or "限流" in ans
+    assert "api_key" not in ans
+
+
+def test_sandbox_error_tells_the_model_to_stop_trying_outside(tmp_path):
+    """光回一句「路径超出工作目录」，模型可能换个同样越界的路径再试。"""
+    _, events = _run(tmp_path, ScriptLLM(
+        _call("read_file", {"path": "..\\..\\evil.txt"}), _done("换个路径，完成")))
+
+    err = [e["result"] for e in events if e["type"] == "tool"][0]
+    assert "工作目录之外" in err or "不要再试" in err, err
+
+
 def test_out_of_sandbox_write_is_fed_back_not_fatal(tmp_path):
     """越界的 write_file 只该被挡下来喂回模型，不该打死整个任务。
 
@@ -166,7 +214,9 @@ def test_out_of_sandbox_write_is_fed_back_not_fatal(tmp_path):
         _done("那我换个路径，完成")))
     assert "完成" in ans
     tool_events = [e for e in events if e["type"] == "tool"]
-    assert tool_events and "SandboxError" in tool_events[0]["result"]
+    # 断言的是「越界这件事被讲清楚并喂了回去」，不是某个异常类名——
+    # 类名是实现细节，讲不讲得清楚才是模型能不能自己修的关键
+    assert tool_events and "工作目录" in tool_events[0]["result"]
     assert not (tmp_path.parent.parent / "evil.txt").exists()
 
 

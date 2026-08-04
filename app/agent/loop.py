@@ -25,6 +25,7 @@ from langgraph.types import Command, interrupt
 
 from app.agent.prompt import system_prompt
 from app.agent.context import history_size, trim_history
+from app.agent.errors import explain
 from app.llm.client import parse_tool_calls
 from app.safety.commands import needs_confirmation
 
@@ -82,7 +83,15 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
         window = trim_history(state["messages"])
         emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(window)})
 
-        reply = llm.chat(window, tools.tools())
+        try:
+            reply = llm.chat(window, tools.tools())
+        except Exception as e:
+            # 模型这一层的错误没有「喂回去让它自己修」这条路可走——模型都联系不上了。
+            # 干净收场，并说清楚是「稍后再来」还是「去改配置」；不重试，SDK 自己
+            # 已经对可重试的状态码退避过了，我们再来一遍就是双重重试。
+            msg = f"出错：{explain(e)}"
+            emit({"type": "final", "content": msg, "ok": False})
+            return {"step": step, "final": msg}
         calls = parse_tool_calls(reply)
         # 没有 tool_calls 时这段 content 就是最终回答，只以 final 发一次。
         # 两个都发的话页面上同一段话会显示两遍，数据库里也会存两条。
@@ -134,8 +143,11 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
                     out.append(ToolMessage(content=result, tool_call_id=c["id"]))
                     continue
                 result = tools.execute(name, args)
-            except Exception as e:               # 工具异常→结构化喂回，触发反思
-                result = f"工具执行出错：{type(e).__name__}: {e}"
+            except Exception as e:
+                # 工具异常一律喂回去让模型自己修（这类基本都是 CORRECTABLE），
+                # 但用 explain 而不是干巴巴的类名——比如沙箱越界要明说「别再试
+                # 工作目录之外的路径」，否则模型很可能换个同样越界的路径再来一次。
+                result = f"工具执行出错：{explain(e)}"
 
             key = json.dumps([name, args, result], ensure_ascii=False, sort_keys=True, default=str)
             counts[key] = counts.get(key, 0) + 1
@@ -166,6 +178,8 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
                 "consecutive": consecutive, "plan": plan, "plan_current": plan_current}
 
     def after_agent(state: AgentState) -> str:
+        if state["final"] is not None:          # 模型层出错，已经收过场了
+            return END
         return "tools" if parse_tool_calls(state["messages"][-1]) else END
 
     def after_tools(state: AgentState) -> str:
