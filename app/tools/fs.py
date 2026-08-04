@@ -4,14 +4,22 @@ from app.safety.sandbox import resolve_in_sandbox
 _BINARY_EXT = {".exe", ".dll", ".png", ".jpg", ".jpeg", ".gif", ".zip",
                ".gz", ".pdf", ".mp4", ".mp3", ".ico", ".class", ".jar"}
 
-def list_dir(work_dir: Path, path: str = ".") -> str:
+def list_dir(work_dir: Path, path: str = ".", max_entries: int = 200) -> str:
+    """列目录。
+
+    ``max_entries`` 和 ``read_file`` 的截断是同一个道理：这段文字直接进模型
+    上下文，一个装了几千个文件的目录能把整个窗口塞满。
+    """
     p = resolve_in_sandbox(work_dir, path)
     if not p.is_dir():
         return f"不是目录：{path}"
-    items = []
-    for c in sorted(p.iterdir()):
-        items.append(("[D] " if c.is_dir() else "[F] ") + c.name)
-    return "\n".join(items) or "(空目录)"
+    entries = sorted(p.iterdir())
+    items = [("[D] " if c.is_dir() else "[F] ") + c.name for c in entries[:max_entries]]
+    if not items:
+        return "(空目录)"
+    if len(entries) > max_entries:
+        items.append(f"...（共 {len(entries)} 项，只列出前 {max_entries} 项）")
+    return "\n".join(items)
 
 def read_file(work_dir: Path, path: str, max_bytes: int = 1_000_000,
               output_limit: int = 8_000) -> str:

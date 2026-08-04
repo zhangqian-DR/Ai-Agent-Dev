@@ -6,6 +6,19 @@ def test_list_dir(tmp_path):
     out = list_dir(tmp_path, ".")
     assert "a.txt" in out and "sub" in out
 
+def test_list_dir_caps_entries(tmp_path):
+    """目录清单是直接进模型上下文的，没有上限的话，一个装了几千个文件的
+    工作目录能把整个窗口塞满。read_file 和 search_in_files 都有上限，这里也要有。"""
+    for i in range(30):
+        (tmp_path / f"f{i:02d}.txt").write_text("x", encoding="utf-8")
+
+    out = list_dir(tmp_path, ".", max_entries=10)
+
+    assert len(out.splitlines()) <= 11, out       # 10 条 + 一行说明
+    assert "f00.txt" in out
+    assert "30" in out, "要说清楚一共有多少、省了多少"
+
+
 def test_read_file(tmp_path):
     (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
     assert "hello" in read_file(tmp_path, "a.txt")
