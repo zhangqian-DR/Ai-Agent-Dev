@@ -38,6 +38,8 @@ class WebSearchArgs(BaseModel):
 
 class SaveMemoryArgs(BaseModel):
     fact: str
+    is_negative: bool = Field(
+        False, description="这条记的是「不要做某事」时设为 true，提示词里会单独标出来")
 
 
 class ToolSet:
@@ -77,9 +79,14 @@ class ToolSet:
         def do_web_search(query: str) -> str:
             return web_search(query, self.provider)
 
-        def save_memory(fact: str) -> str:
-            self.store.add_memory(fact)
-            return f"已记住：{fact}"
+        def save_memory(fact: str, is_negative: bool = False) -> str:
+            added = self.store.add_memory(fact, is_negative=is_negative)
+            mark = "（禁令）" if is_negative else ""
+            if not added:
+                # 如实说是重复，别回"已记住"让模型以为又存了一条、
+                # 也免得它以为没记住而反复再试
+                return f"这条已经记过了，无需重复{mark}：{fact}"
+            return f"已记住{mark}：{fact}"
 
         def update_plan(steps: List[str], current: int = 1) -> str:
             self.plan = list(steps)
@@ -104,7 +111,9 @@ class ToolSet:
               "重新调用一次，只把 current 加一，用户界面的计划面板据此显示进度。",
               UpdatePlanArgs),
             T(do_web_search, "web_search", "联网搜索资料", WebSearchArgs),
-            T(save_memory, "save_memory", "记住关于用户的一条长期事实", SaveMemoryArgs),
+            T(save_memory, "save_memory",
+              "记住关于用户的一条长期事实。记「不要做某事」时把 is_negative 设为 true。",
+              SaveMemoryArgs),
         ]
 
     # ---------- 对外 ----------

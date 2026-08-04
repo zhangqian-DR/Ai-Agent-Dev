@@ -27,6 +27,9 @@ class Config:
     cmd_output_limit: int = 2000
     # 单次写入的内容上限，挡畸形大文件（挡不住上下文膨胀，见 fs.write_file）
     max_write_chars: int = 64_000
+    # 拼进 system prompt 的记忆条数上限。全部记忆是每一轮都无条件注入的，
+    # 不设上限提示词会一直膨胀。只限注入，库里一条不删。
+    max_memories: int = 50
 
     @property
     def checkpoint_path(self) -> Path:
@@ -70,4 +73,5 @@ def load_config(path: str = "config.json") -> Config:
         read_output_limit=_int("read_output_limit"),
         cmd_output_limit=_int("cmd_output_limit"),
         max_write_chars=_int("max_write_chars"),
+        max_memories=_int("max_memories"),
     )

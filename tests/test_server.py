@@ -224,6 +224,21 @@ def test_rejection_is_flagged_and_persisted(tmp_path):
     assert any(m["status"] == "rejected" for m in replayed)
 
 
+def test_memories_endpoint_exposes_polarity(tmp_path):
+    """面板要能把禁令和普通事实分开显示，所以极性得跟着出来。"""
+    db = _db(tmp_path)
+    store = Store(str(db))
+    store.add_memory("用户用 Java")
+    store.add_memory("用 tab 缩进", is_negative=True)
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    client = TestClient(create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider()))
+
+    got = client.get("/memories").json()["memories"]
+
+    assert [m["fact"] for m in got] == ["用户用 Java", "用 tab 缩进"]
+    assert [m["is_negative"] for m in got] == [False, True]
+
+
 def test_shutdown_closes_the_store(tmp_path):
     """程序退出后不该还占着 agent.db。"""
     db = _db(tmp_path)

@@ -63,6 +63,13 @@ copy config.example.json config.json
 
 - `agent.db` —— 会话、消息、长期记忆（SQLite 单文件）。默认在程序目录，可用 `db_path` 改。
   **不能放进 `work_dir`**（agent 对那里有写权限，会改到自己的记忆）——放了直接拒绝启动。
+- **长期记忆**：`save_memory` 写进去，右栏面板显示。三条约束：
+  重复的不再入库（折叠空白、忽略大小写；极性不同算两条不同的事实）；
+  拼进 system prompt 的**只取最近 `max_memories`（默认 50）条**，库里一条不删——
+  限的是注入预算，不是数据；
+  **禁令单独打标**，提示词里是 `【用户明确禁止】…`，面板上标红。
+  「要用 tab」和「不要用 tab」结构一样的话，那个「不」字全靠模型自己读到，读漏一次
+  就会做出正好相反的事。
 - `agent.checkpoints.sqlite` —— LangGraph 的 checkpoint，跟着 `db_path` 走、和 `agent.db`
   分开放（两者的锁和生命周期各归各管）。它只用来跨越确认闸，**任务一结束就删掉那一轮**，
   所以不会无界增长。
@@ -101,7 +108,8 @@ copy config.example.json config.json
 还有几个上限，键名与 `app/config.py` 的字段名一致，写进 `config.json` 即可覆盖：
 `max_file_bytes` 单文件 >1MB 拒读、`read_output_limit` 返回给模型的内容 ≤8000 字符、
 `cmd_output_limit` 命令输出 ≤2000 字符、`cmd_timeout` 命令 30 秒超时、
-`max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步。
+`max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步、
+`max_memories` 注入提示词的记忆条数 ≤50。
 
 ## 开发
 
@@ -109,7 +117,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-137 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+149 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·

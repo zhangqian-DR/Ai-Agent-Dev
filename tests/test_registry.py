@@ -73,6 +73,23 @@ def test_execute_save_memory(tmp_path):
     assert "记住" in _ts(tmp_path).execute("save_memory", {"fact": "用户用 Java"})
 
 
+def test_save_memory_can_flag_negative(tmp_path):
+    """模型得能声明"这是一条禁令"——靠文本里有没有"不"字去猜太脆。"""
+    ts = _ts(tmp_path)
+    ts.execute("save_memory", {"fact": "用 tab 缩进", "is_negative": True})
+    assert ts.store.get_memories()[0]["is_negative"] is True
+
+
+def test_save_memory_tells_the_model_it_was_a_duplicate(tmp_path):
+    """重复记同一件事时要如实说，别回一句"已记住"让模型以为又存了一条。"""
+    ts = _ts(tmp_path)
+    ts.execute("save_memory", {"fact": "用户用 Java"})
+    again = ts.execute("save_memory", {"fact": "用户用 Java"})
+
+    assert "已经" in again or "重复" in again, f"没告诉模型这是重复：{again!r}"
+    assert len(ts.store.get_memories()) == 1
+
+
 def test_list_dir_path_is_optional(tmp_path):
     """不传 path 时默认列工作目录本身，别逼模型每次都写 '.'。"""
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")

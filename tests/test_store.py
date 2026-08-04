@@ -74,6 +74,70 @@ def test_status_column_is_added_to_an_old_db(tmp_path):
     assert rows[0]["status"] == ""      # 老记录没有标志，前端对它仍走字符串兜底
 
 
+# ---------- 记忆 ----------
+
+def test_memory_round_trips_with_polarity(tmp_path):
+    """正向和负向要分得开——「要用 tabs」和「不要用 tabs」在提示词里长得一样，
+    模型很容易把那个「不」读漏。"""
+    s = Store(str(tmp_path / "m1.db"))
+    s.add_memory("用户用 Java")
+    s.add_memory("不要用 tab 缩进", is_negative=True)
+
+    got = s.get_memories()
+    assert [m["fact"] for m in got] == ["用户用 Java", "不要用 tab 缩进"]
+    assert [m["is_negative"] for m in got] == [False, True]
+
+
+def test_duplicate_memory_is_not_stored_twice(tmp_path):
+    """模型会反复记同一件事。不去重的话同一条会在提示词里出现好几遍，
+    而且永远没有办法收敛。"""
+    s = Store(str(tmp_path / "m2.db"))
+    assert s.add_memory("用户用 Java") is True
+    assert s.add_memory("  用户用   Java  ") is False, "空白差异不算新记忆"
+    assert s.add_memory("用户用 JAVA") is False, "大小写差异不算新记忆"
+
+    assert len(s.get_memories()) == 1
+
+
+def test_same_text_with_different_polarity_is_a_new_memory(tmp_path):
+    """极性相反就是两条不同的事实，不能当重复吞掉。"""
+    s = Store(str(tmp_path / "m3.db"))
+    assert s.add_memory("用 tab 缩进") is True
+    assert s.add_memory("用 tab 缩进", is_negative=True) is True
+    assert len(s.get_memories()) == 2
+
+
+def test_memory_injection_is_capped(tmp_path):
+    """全部记忆是无条件拼进每一次 system prompt 的，不设上限就会一直膨胀。
+    上限只作用于「注入多少」，库里一条都不删——删用户的东西得由用户决定。"""
+    s = Store(str(tmp_path / "m4.db"))
+    for i in range(60):
+        s.add_memory(f"事实 {i}")
+
+    latest = s.get_memories(limit=50)
+    assert len(latest) == 50
+    assert latest[-1]["fact"] == "事实 59", "要保留最近的"
+    assert latest[0]["fact"] == "事实 10"
+    assert len(s.get_memories()) == 60, "库里一条都不该少"
+
+
+def test_memory_columns_added_to_an_old_db(tmp_path):
+    """老库的 memory 表只有 id/fact/created_at，得补列且不碰已有记录。"""
+    db = tmp_path / "old_mem.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE memory(id INTEGER PRIMARY KEY AUTOINCREMENT, fact TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP);""")
+    conn.execute("INSERT INTO memory(fact) VALUES('祖传的一条记忆')")
+    conn.commit()
+    conn.close()
+
+    s = Store(str(db))
+    got = s.get_memories()
+    assert [m["fact"] for m in got] == ["祖传的一条记忆"]
+    assert got[0]["is_negative"] is False
+
+
 def test_close_is_safe_while_another_thread_is_writing(tmp_path):
     """连接是 check_same_thread=False 跨线程共享的，却没有锁。
 

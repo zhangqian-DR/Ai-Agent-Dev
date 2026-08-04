@@ -92,6 +92,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .plan li.active{color:var(--text);font-weight:500}.plan li.active .mark{color:var(--accent)}
 .mem{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
 .mem li{font-size:12.5px;color:var(--text-dim);line-height:1.45;padding-left:11px;border-left:2px solid var(--line)}
+.mem li.neg{border-left-color:var(--danger);color:var(--danger)}
 .meter-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);
   font-size:11.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;margin-bottom:5px}
 .meter-row b{color:var(--text);font-weight:500}
@@ -374,9 +375,15 @@ function poll(){
 }
 function scheduleNext(){setTimeout(poll,1000);}
 
+// 禁令单独标出来。「要用 tab」和「不要用 tab」长得一样的话，
+// 面板上根本看不出哪条是禁令——提示词里也是同一个道理。
 fetch('/memories').then(function(r){return r.json();}).then(function(d){
   var list=d.memories||[];memEl.innerHTML='';
-  (list.length?list:['（暂无）']).forEach(function(m){memEl.appendChild(el('li',null,m));});
+  if(!list.length){memEl.appendChild(el('li',null,'（暂无）'));return;}
+  list.forEach(function(m){
+    var neg=!!m.is_negative;
+    memEl.appendChild(el('li',neg?'neg':null,(neg?'禁止 · ':'')+(m.fact||'')));
+  });
 }).catch(function(){});
 
 sendBtn.addEventListener('click',send);

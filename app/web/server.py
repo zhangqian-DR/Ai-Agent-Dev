@@ -173,7 +173,9 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         sess.runner = AgentRunner(llm=the_llm, tools=build_tools(cfg, store, provider),
                                   cfg=cfg, emit=_emit, checkpointer=checkpointer)
         thread_id = str(sess.session_id)
-        memories = store.get_memories()
+        # 只注入最近 N 条：全部记忆是每轮都拼进 system prompt 的，不设上限会一直膨胀。
+        # /memories 面板仍然显示全部——限的是注入，不是数据。
+        memories = store.get_memories(limit=cfg.max_memories)
         _drive(lambda: sess.runner.start(goal, memories, thread_id), thread_id)
         return {"ok": True}
 
