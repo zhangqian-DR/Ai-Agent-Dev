@@ -1,4 +1,4 @@
-# win-ai-agent
+﻿# win-ai-agent
 
 Windows 本地 AI Coding Agent（MVP）。浏览器聊天，能读写文件、跑命令、联网搜索、改代码，
 数据全存本地 SQLite。核心智能靠千问，本项目负责外壳 + 工具循环 + 安全阀 + 存储。
@@ -110,9 +110,18 @@ direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很
 或点了两个文件就是跨文件的活。关键词表是先写标注语料、再设计规则定出来的，那份语料
 就是 `tests/test_router.py`。
 
-> **当前状态**：分诊和模型分层已经生效，但 `direct` 与 `slow` 目前**仍走 fast 那套
-> ReAct**，区别只在用哪档模型。不配 `model_direct` / `model_slow` 的话三档同一个模型，
-> 行为与改造前完全一致。
+`direct` 是**真的不绑工具**——不是换个模型而已。没绑工具，模型就算想调 `write_file`
+也调不出来，"回答问题"和"能动手"是物理隔开的。它的系统提示词也另写了一份短的：
+ReAct 那份在讲八个工具和逐步执行，留在这条路上不只是费 token，更会让模型说出
+"我这就去读那个文件"这种它做不到的话。实测一次「你能做什么」：
+
+```
+提示词        698 → 230 字符
+input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示词 + 无工具 + flash）
+```
+
+> **当前状态**：`slow` 目前**仍走 fast 那套 ReAct**，区别只在用哪档模型。
+> 不配 `model_direct` / `model_slow` 的话三档同一个模型。
 
 ### 联网搜索选哪个
 
@@ -143,7 +152,7 @@ direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-258 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+265 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 其中 32 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着

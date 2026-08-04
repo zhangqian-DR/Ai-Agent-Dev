@@ -224,6 +224,25 @@ def test_rejection_is_flagged_and_persisted(tmp_path):
     assert any(m["status"] == "rejected" for m in replayed)
 
 
+def test_direct_path_binds_no_tools(tmp_path):
+    """分诊到 direct 时必须真的不绑工具——否则这条路只是换了个模型，
+    「回答问题」和「能动手」并没有被隔开。"""
+    seen = []
+
+    class Spy:
+        def chat(self, m, t):
+            seen.append(t)
+            return AIMessage(content="我是一个本地助手")
+
+    client = TestClient(_app(tmp_path, Spy()))
+    client.post("/send", json={"goal": "你能做什么"})
+    events, _ = _drain(client)
+
+    assert client.get("/poll").json()["path"] == "direct"
+    assert seen == [[]], f"direct 路绑了工具：{seen}"
+    assert any(e["type"] == "final" and "本地助手" in e["content"] for e in events)
+
+
 def test_poll_exposes_the_routed_path_and_model(tmp_path):
     """分诊结果要看得见——不然路由判错了没人知道，只会觉得"它今天有点笨"。"""
     client = TestClient(_app(tmp_path, ListDirLLM()))

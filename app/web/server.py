@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from app.agent.direct import DirectRunner
 from app.agent.loop import AgentRunner
 from app.agent.router import route
 from app.llm.client import LLMClient
@@ -189,8 +190,12 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         store.add_message(sess.session_id, "user", goal)
         # ToolSet 与 runner 整轮共用：plan/plan_current 挂在 ToolSet 上，
         # 每次恢复都新建的话计划面板会在确认之后凭空清空。
-        sess.runner = AgentRunner(llm=llms[sess.path], tools=build_tools(cfg, store, provider),
-                                  cfg=cfg, emit=_emit, checkpointer=checkpointer)
+        if sess.path == "direct":
+            # 没有工具、没有循环、也就不可能有确认闸，用不着图和 checkpointer
+            sess.runner = DirectRunner(llm=llms[sess.path], cfg=cfg, emit=_emit)
+        else:
+            sess.runner = AgentRunner(llm=llms[sess.path], tools=build_tools(cfg, store, provider),
+                                      cfg=cfg, emit=_emit, checkpointer=checkpointer)
         thread_id = str(sess.session_id)
         # 只注入最近 N 条：全部记忆是每轮都拼进 system prompt 的，不设上限会一直膨胀。
         # /memories 面板仍然显示全部——限的是注入，不是数据。
