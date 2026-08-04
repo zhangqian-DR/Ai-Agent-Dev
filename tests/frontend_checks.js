@@ -37,18 +37,20 @@ globalThis.document = {
 
 let HISTORY = { messages: [] };
 let MEMORIES = { memories: [] };
+let POLL = { events: [], pending: null, running: false, plan: [], plan_current: 0,
+             work_dir: 'D:/ws', path: '', model: 'qwen-plus', max_steps: 20 };
 const DELETED = [];
 globalThis.fetch = (url, opts) => {
+  const u = String(url);
   if (opts && opts.method === 'DELETE') {
-    DELETED.push(String(url));
-    MEMORIES = { memories: MEMORIES.memories.filter(m => !String(url).endsWith('/' + m.id)) };
+    DELETED.push(u);
+    MEMORIES = { memories: MEMORIES.memories.filter(m => !u.endsWith('/' + m.id)) };
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
   }
-  return Promise.resolve({
-    ok: true, status: 200,
-    json: () => Promise.resolve(String(url).includes('/memories') ? MEMORIES : HISTORY),
-  });
+  const body = u.includes('/memories') ? MEMORIES : u.includes('/poll') ? POLL : HISTORY;
+  return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 };
+globalThis.setTimeout = globalThis.setTimeout;   // 轮询会排下一次，进程退出时一起收
 
 // ---------- 载入页面脚本 ----------
 
@@ -62,8 +64,9 @@ function load() {
   const name = '__api' + (++seq);
   // 把 IIFE 收尾那句换成导出，顺便不让它启动 1 秒轮询
   eval(src.replace('setCtx(0);poll();',
-    `globalThis.${name}={handle:handle,restore:restore,showGate:showGate};`));
-  return { api: globalThis[name], log: ids['log'], planEl: ids['plan'], mem: ids['mem'] };
+    `globalThis.${name}={handle:handle,restore:restore,showGate:showGate,poll:poll};`));
+  return { api: globalThis[name], log: ids['log'], planEl: ids['plan'],
+           mem: ids['mem'], pathEl: ids['path'] };
 }
 
 const text = n => (n.textContent || '') + n.children.map(text).join(' ');
@@ -191,7 +194,26 @@ replay([
         text(log.children[0]).slice(0, 40));
 
 // ---------- 记忆面板 ----------
+
+// ---------- 状态栏：分诊结果要看得见 ----------
 })).then(() => {
+  const { api, pathEl } = load();
+  POLL = { ...POLL, path: 'slow', model: 'qwen-max' };
+  api.poll();
+  return new Promise(r => setTimeout(r, 0)).then(() => {
+    check('状态栏显示分诊到的路径', pathEl.textContent.includes('slow'), pathEl.textContent);
+  });
+}).then(() => {
+  const { api, pathEl } = load();
+  POLL = { ...POLL, path: '' };            // 还没发过任务
+  api.poll();
+  return new Promise(r => setTimeout(r, 0)).then(() => {
+    check('还没分诊时显示占位而不是 undefined',
+          pathEl.textContent === '—', pathEl.textContent);
+  });
+
+// ---------- 记忆面板 ----------
+}).then(() => {
   MEMORIES = { memories: [
     { id: 7, fact: '用户主要写 Java', is_negative: false },
     { id: 8, fact: '用 tab 缩进', is_negative: true },

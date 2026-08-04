@@ -122,6 +122,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <div class="statusbar">
   <div class="si"><span class="lamp" id="lamp"></span><b id="statusText">空闲</b></div>
   <div class="si"><span class="k">工作目录</span><b id="workDir">…</b></div>
+  <div class="si"><span class="k">路径</span><b id="path">…</b></div>
   <div class="si"><span class="k">模型</span><b id="model">…</b></div>
   <div class="si"><span class="k">步数</span><b id="steps">0 / 20</b></div>
 </div>
@@ -157,9 +158,11 @@ var log=document.getElementById('log'),planEl=document.getElementById('plan'),me
     lamp=document.getElementById('lamp'),statusText=document.getElementById('statusText'),
     stepsEl=document.getElementById('steps'),ctxNum=document.getElementById('ctxNum'),ctxBar=document.getElementById('ctxBar'),
     workDir=document.getElementById('workDir'),modelEl=document.getElementById('model'),
+    pathEl=document.getElementById('path'),
     goal=document.getElementById('goal'),sendBtn=document.getElementById('send'),toast=document.getElementById('toast');
 
 var CTX_BUDGET=24000, gateId=null, planDone=0, lastPlan=[];
+var PATH_LABEL={direct:'direct 直答', fast:'fast ReAct', slow:'slow 规划反思'};
 
 function el(tag,cls,text){var d=document.createElement(tag);if(cls)d.className=cls;if(text!=null)d.textContent=text;return d;}
 function add(n){log.appendChild(n);log.scrollTop=log.scrollHeight;return n;}
@@ -366,6 +369,9 @@ function poll(){
   fetch('/poll').then(function(r){return r.json();}).then(function(d){
     failed=0;
     workDir.textContent=d.work_dir;modelEl.textContent=d.model;
+    // 分诊结果要看得见：路由判错时用户能一眼看出「它走错路了」，
+    // 而不是只觉得"今天有点笨"
+    pathEl.textContent=PATH_LABEL[d.path]||'—';
     if(d.max_steps)stepsEl.textContent=stepsEl.textContent.replace(/\/ \d+$/,'/ '+d.max_steps);
     // 首次轮询：没有任务在跑时才回放历史，避免和正在推送的事件重复
     // 返回 promise 让 finally 等它跑完再排下一次；不能在这里自己 scheduleNext，会排两遍

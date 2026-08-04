@@ -35,6 +35,14 @@ class Config:
     # "随手写个脚本"这类任务根本没有测试可跑，不该被验收卡住。
     verify_cmd: str = ""
     max_verify_rounds: int = 2
+    # 模型分层。留空就退回 model —— 不配分层的话三档同一个模型，行为完全不变。
+    # direct 不绑工具，用便宜的档就够（工具调用不稳的模型在这里也无所谓）。
+    model_direct: str = ""
+    model_slow: str = ""
+
+    def model_for(self, path: str) -> str:
+        """按路径挑模型。fast 就是 model 本身，认不出的档也退回它。"""
+        return {"direct": self.model_direct, "slow": self.model_slow}.get(path) or self.model
 
     @property
     def checkpoint_path(self) -> Path:
@@ -81,4 +89,6 @@ def load_config(path: str = "config.json") -> Config:
         max_memories=_int("max_memories"),
         verify_cmd=raw.get("verify_cmd", ""),
         max_verify_rounds=_int("max_verify_rounds"),
+        model_direct=raw.get("model_direct", ""),
+        model_slow=raw.get("model_slow", ""),
     )

@@ -224,6 +224,37 @@ def test_rejection_is_flagged_and_persisted(tmp_path):
     assert any(m["status"] == "rejected" for m in replayed)
 
 
+def test_poll_exposes_the_routed_path_and_model(tmp_path):
+    """分诊结果要看得见——不然路由判错了没人知道，只会觉得"它今天有点笨"。"""
+    client = TestClient(_app(tmp_path, ListDirLLM()))
+    client.post("/send", json={"goal": "分析这个项目所有会写盘的地方"})
+    _drain(client)
+
+    d = client.get("/poll").json()
+    assert d["path"] == "slow"
+    assert d["model"], "模型名也要跟着这一轮走"
+
+
+def test_each_path_gets_its_own_model(tmp_path):
+    """分层要真的接上：三条路各自拿到自己那档的模型。"""
+    db = _db(tmp_path)
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db,
+                 model_direct="qwen-flash", model_slow="qwen-max")
+    app = create_app(cfg, store=Store(str(db)), provider=FakeProvider())
+    built = app.state.llms
+
+    assert built["direct"].cfg.model == "qwen-flash"
+    assert built["fast"].cfg.model == "qwen-plus"
+    assert built["slow"].cfg.model == "qwen-max"
+
+
+def test_injected_llm_is_used_for_every_path(tmp_path):
+    """测试注入一个假模型时，三条路都该用它——否则每加一条路就要改一遍假件。"""
+    fake = ListDirLLM()
+    app = _app(tmp_path, fake)
+    assert set(app.state.llms.values()) == {fake}
+
+
 def test_memories_endpoint_exposes_polarity(tmp_path):
     """面板要能把禁令和普通事实分开显示，所以极性得跟着出来。"""
     db = _db(tmp_path)

@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.agent.loop import AgentRunner
+from app.agent.router import route
 from app.llm.client import LLMClient
 from app.store.db import Store
 from app.tools.registry import build_tools
@@ -41,6 +43,8 @@ class Session:
         self.running = False
         self.driving = False
         self.session_id = None
+        self.path = ""                       # 这一轮分诊到哪条路
+        self.model = ""                      # 以及实际用的哪档模型
         self.runner = None                   # AgentRunner，start 与 resume 共用同一个
         self._lock = threading.Lock()
 
@@ -91,11 +95,22 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
 
     app = FastAPI(title="win-ai-agent", lifespan=lifespan)
     provider = provider or build_provider(cfg)
-    the_llm = llm or LLMClient(cfg)
     sess = Session()
+
+    # 三条路各自一档模型。注入了假模型时三条路共用它——否则每加一条路
+    # 就得改一遍所有假件。不配分层的话三档本来也是同一个模型。
+    if llm is not None:
+        llms = {p: llm for p in ("direct", "fast", "slow")}
+    else:
+        llms = {}
+        for p in ("direct", "fast", "slow"):
+            tier = replace(cfg, model=cfg.model_for(p))
+            llms[p] = LLMClient(tier)
+
     app.state.provider = provider          # 让测试能验证默认这条路建对了没
     app.state.session = sess
     app.state.checkpointer = checkpointer
+    app.state.llms = llms
 
     def _emit(ev: dict):
         t = ev.get("type")
@@ -166,11 +181,15 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         sess.plan_current = 0
         sess.pending = None
         sess.take_wheel()
+        # 分诊：纯关键词，零 LLM 成本。目前 fast 与 slow 走的是同一套 ReAct，
+        # 区别只在用哪档模型——规划+反思那条路是后面的阶段。
+        sess.path = route(goal)
+        sess.model = cfg.model_for(sess.path)
         sess.session_id = store.create_session(goal[:40] or "未命名会话")
         store.add_message(sess.session_id, "user", goal)
         # ToolSet 与 runner 整轮共用：plan/plan_current 挂在 ToolSet 上，
         # 每次恢复都新建的话计划面板会在确认之后凭空清空。
-        sess.runner = AgentRunner(llm=the_llm, tools=build_tools(cfg, store, provider),
+        sess.runner = AgentRunner(llm=llms[sess.path], tools=build_tools(cfg, store, provider),
                                   cfg=cfg, emit=_emit, checkpointer=checkpointer)
         thread_id = str(sess.session_id)
         # 只注入最近 N 条：全部记忆是每轮都拼进 system prompt 的，不设上限会一直膨胀。
@@ -188,7 +207,9 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             "plan": sess.plan,
             "plan_current": sess.plan_current,
             "work_dir": str(cfg.work_dir),
-            "model": cfg.model,
+            # 分诊结果要看得见——路由判错了不暴露的话，用户只会觉得"它今天有点笨"
+            "path": sess.path,
+            "model": sess.model or cfg.model,
             "max_steps": cfg.max_steps,
         }
 

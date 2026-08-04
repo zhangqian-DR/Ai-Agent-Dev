@@ -91,6 +91,28 @@ copy config.example.json config.json
 | `search_provider` | `dashscope` | 见下 |
 | `port` | `8000` | 被占用时自动 +1 |
 | `verify_cmd` | 空 | 验收命令，如 `pytest -q`。**留空就整个关掉**，见下 |
+| `model_direct` / `model_slow` | 空 | 模型分层，留空就都用 `model`。见下 |
+
+### 分诊与模型分层
+
+目标进来先过一道**纯关键词**的分诊（`app/agent/router.py`，零 LLM 成本），分成三条路：
+
+| 路径 | 什么样的目标 | 模型 |
+|---|---|---|
+| `direct` | 元问题与闲聊（"你能做什么"） | `model_direct` |
+| `fast` | 目标具体的活儿（"修好 calc.py 的 bug"） | `model` |
+| `slow` | 跨文件、要先想清楚（"分析所有会写盘的地方"） | `model_slow` |
+
+判错的代价**不对称**，所以规则往上偏：把闲聊判成 fast 只是多花点 token，把真任务判成
+direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很窄，认不出来的一律走 `fast`。
+
+规则不只看关键词，还看**范围**——「恰好点名一个文件」是具体活儿，「所有 / 整个项目」
+或点了两个文件就是跨文件的活。关键词表是先写标注语料、再设计规则定出来的，那份语料
+就是 `tests/test_router.py`。
+
+> **当前状态**：分诊和模型分层已经生效，但 `direct` 与 `slow` 目前**仍走 fast 那套
+> ReAct**，区别只在用哪档模型。不配 `model_direct` / `model_slow` 的话三档同一个模型，
+> 行为与改造前完全一致。
 
 ### 联网搜索选哪个
 
@@ -121,7 +143,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-216 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+256 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 其中 30 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着

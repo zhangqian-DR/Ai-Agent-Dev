@@ -65,6 +65,39 @@ def test_every_knob_can_be_configured(tmp_path):
     assert cfg.max_write_chars == 1011
 
 
+def test_model_tiers_default_to_the_single_model(tmp_path):
+    """不配分层就三档同一个模型——现有的 config.json 一个字不用改，
+    行为也完全不变。分层是加进来的能力，不是必须先做的迁移。"""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"api_key": "", "model": "qwen-plus"}), encoding="utf-8")
+
+    cfg = load_config(str(cfg_file))
+
+    assert cfg.model_for("direct") == "qwen-plus"
+    assert cfg.model_for("fast") == "qwen-plus"
+    assert cfg.model_for("slow") == "qwen-plus"
+
+
+def test_model_tiers_can_be_configured(tmp_path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({
+        "api_key": "", "model": "qwen-plus",
+        "model_direct": "qwen-flash", "model_slow": "qwen-max",
+    }), encoding="utf-8")
+
+    cfg = load_config(str(cfg_file))
+
+    assert cfg.model_for("direct") == "qwen-flash"
+    assert cfg.model_for("fast") == "qwen-plus", "fast 就是 model 本身"
+    assert cfg.model_for("slow") == "qwen-max"
+
+
+def test_unknown_tier_falls_back_to_the_default_model(tmp_path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps({"api_key": "", "model": "qwen-plus"}), encoding="utf-8")
+    assert load_config(str(cfg_file)).model_for("没这一档") == "qwen-plus"
+
+
 def test_db_inside_work_dir_is_rejected(tmp_path):
     """agent 对 work_dir 有写权，db 放进去它就能改到自己的记忆。
     config.py 的注释和 README 都警告过，但只有代码拦得住。"""
