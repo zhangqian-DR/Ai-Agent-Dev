@@ -94,12 +94,14 @@ graph TD
   SRV --> RUN["agent/loop.py<br/>AgentRunner · start / resume"]
   SRV --> STORE["store/db.py<br/>会话 · 消息 · 记忆"]
   SRV --> CKPT[("agent.checkpoints.sqlite<br/>SqliteSaver")]
-  RUN --> GRAPH["StateGraph<br/>agent ⇄ tools"]
+  RUN --> GRAPH["StateGraph<br/>agent ⇄ tools ⇄ verify"]
   GRAPH --> CTX["agent/context.py<br/>trim_history"]
   GRAPH --> PROMPT["agent/prompt.py<br/>system_prompt"]
+  GRAPH --> ERR["agent/errors.py<br/>错误三分"]
   GRAPH --> LLM["llm/client.py<br/>ChatOpenAI 薄封装"]
   GRAPH --> REG["tools/registry.py<br/>LangChain 工具对象"]
   GRAPH -. 白名单 .-> CMD["safety/commands.py"]
+  GRAPH -. 验收命令 .-> SH
   RUN -. 存/取 .-> CKPT
   REG --> FS["tools/fs.py"]
   REG --> SH["tools/shell.py"]
@@ -107,7 +109,7 @@ graph TD
   REG --> STORE
   FS -. 沙箱 .-> SB["safety/sandbox.py"]
   LLM --> API(["千问 DashScope"])
-  WEB --> DDG(["DuckDuckGo"])
+  WEB --> DDG(["ddgs 聚合搜索"])
 
   classDef entry fill:#fdf1e0,stroke:#c79245,color:#3a2a12
   classDef safety fill:#fbeceb,stroke:#c76a60,color:#3d1a17
@@ -117,7 +119,8 @@ graph TD
   class API,DDG,CKPT ext
 </pre>
   </div>
-  <div class="read"><b>读法：</b>红色是两道安全阀，虚线表示"被查询"而非"被编排"。外部依赖只有两个，都可替换。</div>
+  <div class="read"><b>读法：</b>红色是两道安全阀，虚线表示"被查询"而非"被编排"。<br/>
+  <code>shell.py</code> 被指了两次：一次是模型调 <code>run_command</code>，一次是 verify 节点跑验收命令——同一个执行器，两种身份。</div>
 </section>
 
 <section>
@@ -162,6 +165,10 @@ sequenceDiagram
   T-->>G: 已写入 并逐代备份
   Note over G: 熔断计数 加 压缩参数
   Note over G: agent 节点 无 tool_calls
+  Note over G: verify 节点 跑验收命令
+  G->>T: run_and_check verify_cmd
+  T-->>G: 过没过 加 输出
+  Note over G: 不过就把失败输出喂回 agent<br/>并把熔断两本账清零
   G-->>A2: 结束
   A2->>S: emit final 加 running 置 False
   A2->>G: delete_thread 清掉本轮 checkpoint
@@ -169,11 +176,13 @@ sequenceDiagram
   F-->>B: final 事件
 </pre>
   </div>
-  <div class="read"><b>读法：</b>两条驱动线程<b>互不重叠</b>——第一条在闸前就退出了。这正是换成 <code>interrupt</code> 换回来的东西：关掉页面不会挂住任何东西，隔多久回来那道闸都还在。<br/>注意第 18 步：恢复时 <b>tools 节点整个从头重跑</b>，所以闸必须在任何副作用之前、且一轮只有一个——这就是"一轮里的危险操作合成一张卡"的由来。</div>
+  <div class="read"><b>读法：</b>两条驱动线程<b>互不重叠</b>——第一条在闸前就退出了。这正是换成 <code>interrupt</code> 换回来的东西：关掉页面不会挂住任何东西，隔多久回来那道闸都还在。<br/>
+  恢复那一步（<code>Command resume</code> 之后）：<b>tools 节点整个从头重跑</b>，所以闸必须在任何副作用之前、且一轮只有一个——这就是"一轮里的危险操作合成一张卡"的由来。这条是写代码前用一个最小图实测确认的，不是照文档推的。<br/>
+  最后的 verify 节点只在配了 <code>verify_cmd</code> 且这一轮真动过东西时才出现。</div>
 </section>
 
 <section>
-  <h2><span class="num">03</span>图的两个节点<span class="src">agent/loop.py build_graph</span></h2>
+  <h2><span class="num">03</span>图的三个节点<span class="src">agent/loop.py build_graph</span></h2>
   <p><code>recursion_limit</code> 等于 <code>max_steps × 2</code>——它数的是<b>节点执行次数</b>，一个 ReAct 回合是 agent 加 tools 两个节点。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
   <div class="plate">
 <pre class="mermaid">
@@ -185,8 +194,11 @@ flowchart TD
     STEP --> CHAT["llm.chat<br/>tool_calls 加 invalid_tool_calls 都要读"]
   end
 
+  CHAT -.->|抛异常| ERRC["错误三分 classify<br/>模型层没有喂回这条路"]
+  ERRC --> ERREND["emit final ok=false<br/>说清是稍后再来还是改配置 → END"]
   CHAT --> HASCALL{"有 tool_calls"}
-  HASCALL -->|没有| FINAL["emit final → END"]
+  HASCALL -->|没有 且该验收| VERIFY
+  HASCALL -->|没有 且不该验收| FINAL["emit final → END"]
   HASCALL -->|有| GATEQ
 
   subgraph TOOLS["tools 节点 —— 恢复时整个从头重跑"]
@@ -197,7 +209,8 @@ flowchart TD
     APPR -->|否| SKIP["过闸的记 用户拒绝了该操作<br/>自动放行的照常执行"]
     APPR -->|是| EXEC["tools.execute<br/>异常转成错误字符串"]
     SKIP --> COUNT
-    EXEC --> COUNT["两把尺子<br/>同参同果累计 加 同参连续"]
+    EXEC --> TOUCH["touched 或等于 needs_confirmation<br/>复用安全阀的分类判有没有动过东西"]
+    TOUCH --> COUNT["两把尺子<br/>同参同果累计 加 同参连续"]
     COUNT --> ABORT{"达到 3"}
     ABORT -->|是| DEAD["emit final 判定死循环 → END"]
     ABORT -->|否| NUDGE{"等于 2"}
@@ -210,14 +223,23 @@ flowchart TD
   end
 
   SHRINK --> AG
+
+  subgraph VERIFYN["verify 节点 —— 配了 verify_cmd 且 touched 才走到"]
+    VERIFY["run_and_check verify_cmd<br/>要的是过没过 不是从输出认 exit 码"] --> VOK{"过了吗"}
+    VOK -->|过了| VFIN["emit final ok=true → END"]
+    VOK -->|没过 还有轮数| VBACK["失败输出以 HumanMessage 喂回<br/>并把熔断两本账清零"]
+    VOK -->|没过 轮数用尽| VBAD["final 带 验收未通过 ok=false → END"]
+  end
+
+  VBACK --> AG
   MAXOUT["超出 recursion_limit<br/>捕获后 emit final 已达最大步数"]
 
   classDef guard fill:#fdf1e0,stroke:#c79245,color:#3a2a12
   classDef stop fill:#fbeceb,stroke:#c76a60,color:#3d1a17
   classDef done fill:#e9f4ed,stroke:#4d9a6c,color:#173423
-  class AG,COUNT,SHRINK,HINT,PREV guard
-  class DEAD,MAXOUT stop
-  class FINAL done
+  class AG,COUNT,SHRINK,HINT,PREV,VERIFY,TOUCH guard
+  class DEAD,MAXOUT,VBAD,ERRC,ERREND stop
+  class FINAL,VFIN done
 </pre>
   </div>
   <div class="read"><b>读法：</b>橙色是护栏。熔断用<b>两把尺子</b>：同参同果<b>累计</b>抓交替死循环，同参<b>连续</b>抓 <code>run_command</code> 那种输出带时间戳、逐字比对永远不相等的情况。<br/><code>interrupt</code> 那一格是虚线回边：第一次抛出让图返回，恢复时<b>整个节点重跑</b>而这一行直接返回放行结果——所以它上面只能算预览，动手必须在它下面。</div>
@@ -229,10 +251,10 @@ flowchart TD
   <div class="plate">
 <pre class="mermaid">
 flowchart TD
-  IN([工具调用]) --> W{"是 write_file"}
-  W -->|是| CONF["需要确认<br/>先给 diff 预览"]
-  W -->|否| R{"是 run_command"}
-  R -->|否| PASS["自动放行<br/>list_dir · read_file · search_in_files<br/>web_search · update_plan · save_memory"]
+  IN([工具调用]) --> R{"是 run_command"}
+  R -->|否| AUTO{"在 AUTO_APPROVED 白名单里"}
+  AUTO -->|"是（6 个只读或只改自身状态的）"| PASS["自动放行<br/>list_dir · read_file · search_in_files<br/>web_search · update_plan · save_memory"]
+  AUTO -->|"否 —— 含 write_file 与任何未知工具"| CONF["需要确认<br/>write_file 先给 diff 预览"]
   R -->|是| META{"含 shell 元字符或换行"}
   META -->|含| CONF
   META -->|不含| ARG{"参数越界<br/>上跳 或 盘符 或 绝对路径"}
@@ -240,12 +262,12 @@ flowchart TD
   ARG -->|没有| HEAD{"首个 token 在白名单"}
   HEAD -->|"dir ls type cat pwd echo whoami"| PASS2["自动放行"]
   HEAD -->|"git status / diff / log"| PASS2
-  HEAD -->|"python 或 pip 的版本与 list"| PASS2
+  HEAD -->|"python 或 pip 且只带唯一的查看开关"| PASS2
   HEAD -->|其它| CONF
 
   PASS --> SB
   PASS2 --> SB["路径类工具再过一道沙箱<br/>resolve 加 commonpath<br/>越界抛 SandboxError"]
-  CONF --> GATE(["页面弹确认闸<br/>确认 / 拒绝"])
+  CONF --> GATE(["页面弹确认闸<br/>一轮里的危险操作合成一张卡"])
 
   classDef gate fill:#fdf1e0,stroke:#c79245,color:#3a2a12
   classDef ok fill:#e9f4ed,stroke:#4d9a6c,color:#173423
@@ -254,9 +276,14 @@ flowchart TD
 </pre>
   </div>
   <div class="read">
-    <b>读法：</b>元字符表是 <code>&amp;&amp;</code>、<code>||</code>、<code>|</code>、<code>;</code>、<code>&gt;</code>、<code>&lt;</code>、<code>&amp;</code>、反引号、<code>$(</code>，
-    以及<b>换行与回车</b>——少了后两个，<code>dir\ndel x</code> 会被判为只读直接放行。参数里的 <code>..</code> 也要拦：
-    <code>run_command</code> 不经过沙箱，白名单里的 <code>type</code>/<code>cat</code> 否则能读到工作目录之外。
+    <b>读法：</b>判定是 <b>fail-closed</b> 的——自动放行是一份<b>显式白名单</b>，没列进去的一律要确认，
+    包括不认识的工具名。反过来写（"认识的危险工具才拦"）的话，以后加一个会写盘的工具、忘了同步改白名单，
+    它就静默地自动放行。<br/>
+    元字符表是 <code>&amp;&amp;</code>、<code>||</code>、<code>|</code>、<code>;</code>、<code>&gt;</code>、<code>&lt;</code>、<code>&amp;</code>、反引号、<code>$(</code>、<code>%</code>，
+    以及<b>换行与回车</b>。少了换行，<code>dir\ndel x</code> 会被判为只读直接放行；少了 <code>%</code>，
+    <code>type %USERPROFILE%\.ssh\id_rsa</code> 会被放行——cmd 展开变量发生在参数检查<b>之后</b>。
+    <code>python -c "任意代码" --version</code> 也曾被放行过：那时开关只要出现在任意位置就算数，
+    现在必须是「解释器 + 唯一的查看开关」两个 token。
   </div>
 </section>
 
@@ -269,11 +296,12 @@ flowchart TD
       <tr><td>step</td><td>n · max · chars</td><td>顶部步数、右栏上下文占用条</td></tr>
       <tr><td>assistant</td><td>content</td><td>🤖 思考文本</td></tr>
       <tr><td>plan</td><td>steps[]</td><td>右栏计划面板 + 一张 update_plan 卡片</td></tr>
-      <tr><td>tool</td><td>name · result · <b>ok</b></td><td>⚙ 工具卡片，<code>ok=false</code> 时标红</td></tr>
+      <tr><td>tool</td><td>name · result · <b>ok</b> · <b>badge?</b></td><td>⚙ 工具卡片，<code>ok=false</code> 时标红；<code>badge</code> 可覆盖角标措辞</td></tr>
       <tr><td>final</td><td>content · <b>ok</b></td><td>✅ 绿框收尾，<code>ok=false</code> 时红框</td></tr>
     </tbody>
   </table>
-  <div class="read"><b>注意：</b><code>pending</code> 不走事件队列——它是 <code>/poll</code> 的独立字段，因为确认是<b>状态</b>不是<b>事件</b>：页面刷新后闸口必须还在。载荷是 <code>{id, actions: [{name, preview}…]}</code>，一轮里的危险操作合成一张卡；<code>id</code> 递增，页面靠它判断"这张卡我画过没有"。<br/><code>ok</code> 是结构化标志，不是从文案开头猜的——不然模型正常回答只要以"出错："开头就会被渲染成错误。落库时对应 <code>messages.status</code>（<code>error</code> / <code>rejected</code>），回放才还原得出来。</div>
+  <div class="read"><b>注意：</b><code>pending</code> 不走事件队列——它是 <code>/poll</code> 的独立字段，因为确认是<b>状态</b>不是<b>事件</b>：页面刷新后闸口必须还在。载荷是 <code>{id, actions: [{name, preview}…]}</code>，一轮里的危险操作合成一张卡；<code>id</code> 递增，页面靠它判断"这张卡我画过没有"。<br/><code>ok</code> 是结构化标志，不是从文案开头猜的——不然模型正常回答只要以"出错："开头就会被渲染成错误。落库时对应 <code>messages.status</code>（<code>error</code> / <code>rejected</code>），回放才还原得出来。<br/>
+<code>badge</code> 是可选的：验收闸失败该说"未通过"而不是复用"已拒绝"。颜色仍按 <code>ok</code> 走，只有措辞由发事件的一方决定。</div>
 </section>
 
 <div class="gap">
@@ -281,7 +309,7 @@ flowchart TD
   <ul>
     <li><b>文档 §3 的"完整循环"</b>只有规划 → 执行 → 反思三步，没有熔断、上下文裁剪、参数压缩——这些都是后来补进 §13 健壮性护栏的，但从没画进流程。</li>
     <li><b>确认闸的语义在文档里完全看不出来。</b>§9 只说"后端进入待确认状态"，没说清停在哪、谁在等谁。这是图 02 存在的理由——而它的答案已经变了一次：早期是 agent 线程阻塞在 <code>threading.Event.wait()</code> 上，现在是图存 checkpoint 后返回、<b>根本没有线程在等</b>。</li>
-    <li><b>反思在图里是隐形的。</b>文档把"出错→反思→重试"画成一个环，但代码里没有对应分支——它靠的是把错误字符串喂回历史 + system prompt 第 3 条，模型自己决定要不要换方法。图 03 里那个"追加系统提示"是唯一一处代码层面的强制反思。</li>
+    <li><b>反思现在有两处是硬的了。</b>文档把"出错→反思→重试"画成一个环，但早期代码里没有对应分支——它靠的是把错误字符串喂回历史 + system prompt 第 3 条，模型自己决定要不要换方法。现在图 03 里有两处是流程强制的：熔断的"追加系统提示"，以及 verify 节点把验收失败喂回去。后者更接近文档想画的那个环，只是判据是<b>机器</b>给的（测试绿不绿），不是模型自评。</li>
     <li><b>文档完全没有 LangGraph。</b>它写的是手写 for 循环。现在循环由 <code>StateGraph</code> 驱动、确认闸由 <code>interrupt</code> 加 <code>SqliteSaver</code> 实现，这几张图是<b>以代码为准</b>重画的。</li>
   </ul>
 </div>
