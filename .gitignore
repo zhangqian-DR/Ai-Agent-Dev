@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 agent.db
+*.checkpoints.sqlite
 config.json
 workspace/
 *.bak

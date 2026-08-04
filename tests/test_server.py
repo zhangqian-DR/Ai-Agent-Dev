@@ -178,34 +178,13 @@ def test_consecutive_confirmations_get_distinct_ids(tmp_path):
     assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
 
 
-def test_confirm_gives_up_when_the_page_stops_polling():
-    """用户关掉页面时确认闸没人应答，agent 线程不能就这么永久挂着。
-
-    挂住的话 running 一直是 True，之后每次 /send 都 409，只能重启进程——
-    而 /send 给出的提示是"刷新页面"，刷新根本救不回来。
-    """
+def test_pending_gets_an_increasing_id():
+    """页面靠这个 id 判断「这张卡我画过没有」。"""
     sess = Session()
-    sess.note_poll()
-    t0 = time.time()
-    assert sess.confirm({"name": "write_file", "preview": ""},
-                        poll_gap=0.05, tick=0.01) is False
-    assert time.time() - t0 < 3, "应该很快放弃，而不是一直等"
-
-
-def test_confirm_keeps_waiting_while_the_page_is_alive():
-    """页面还在轮询就一直等——用户可能只是在慢慢看 diff。"""
-    sess = Session()
-    sess.note_poll()
-
-    def still_reading():
-        for _ in range(30):
-            sess.note_poll()
-            time.sleep(0.01)
-        sess.resolve(True)
-
-    threading.Thread(target=still_reading, daemon=True).start()
-    assert sess.confirm({"name": "write_file", "preview": ""},
-                        poll_gap=0.05, tick=0.01) is True
+    sess.set_pending({"actions": [{"name": "write_file", "preview": ""}]})
+    first = sess.pending["id"]
+    sess.set_pending({"actions": [{"name": "run_command", "preview": ""}]})
+    assert sess.pending["id"] > first
 
 
 def test_task_failure_is_persisted(tmp_path):
@@ -261,13 +240,77 @@ def test_shutdown_closes_the_store(tmp_path):
         store.conn.execute("SELECT 1")
 
 
-def test_poll_marks_the_page_alive(tmp_path):
-    """确认闸靠 /poll 判断页面是否还活着，这条线必须真的接上。"""
-    client = TestClient(_app(tmp_path, ListDirLLM()))
+def _settle(sess, timeout=5):
+    """等驱动线程真正退出。"""
+    end = time.time() + timeout
+    while sess.driving and time.time() < end:
+        time.sleep(0.02)
+    return sess.driving
+
+
+def test_no_thread_is_held_while_waiting_for_approval(tmp_path):
+    """确认闸不再占着线程——这是换成 interrupt 换回来的东西。
+
+    图撞上闸就返回，线程随之结束，但任务并没有结束。之前那套「30 秒没轮询
+    就按拒绝收场」的兜底，正是为了防止线程被永久挂住而存在的；现在没有线程
+    可挂，那套东西也就不需要了。
+    """
+    client = TestClient(_app(tmp_path, WriteLLM()))
+    client.post("/send", json={"goal": "写文件"})
+    assert _wait_pending(client) is not None
+
     sess = client.app.state.session
-    sess.last_poll = 0.0
-    client.get("/poll")
-    assert sess.last_poll > 0.0
+    assert _settle(sess) is False, "等待确认期间仍有线程在跑图"
+    assert sess.running is True, "任务应当仍算进行中"
+    assert client.post("/send", json={"goal": "插队"}).status_code == 409
+
+
+def test_pending_still_there_after_the_page_walks_away(tmp_path):
+    """用户关掉页面、隔一会儿回来，那道闸还在，答完照样往下跑。"""
+    client = TestClient(_app(tmp_path, WriteLLM()))
+    client.post("/send", json={"goal": "写文件"})
+    first = _wait_pending(client)
+    assert first is not None
+
+    time.sleep(0.3)                       # 页面走开一会儿，期间没有任何轮询
+    again = client.get("/poll").json()["pending"]
+    assert again and again["id"] == first["id"], "闸自己消失了"
+
+    client.post("/approve", json={"ok": True})
+    events, _ = _drain(client)
+    assert any(e["type"] == "final" for e in events)
+    assert (tmp_path / "x.txt").exists()
+
+
+def test_checkpoints_are_cleaned_up_when_the_task_ends(tmp_path):
+    """checkpoint 只用来跨越确认闸，任务一结束就没有消费者了——对话记录本来
+    就在 agent.db 里。不删的话这个库只增不减，而且没人会去看。"""
+    client = TestClient(_app(tmp_path, WriteLLM()))
+    client.post("/send", json={"goal": "写文件"})
+    assert _wait_pending(client) is not None
+
+    sess = client.app.state.session
+    saver = client.app.state.checkpointer
+    cfg = {"configurable": {"thread_id": str(sess.session_id)}}
+    assert saver.get_tuple(cfg) is not None, "等待确认时 checkpoint 必须在"
+
+    client.post("/approve", json={"ok": True})
+    _drain(client)
+    _settle(sess)
+
+    assert saver.get_tuple(cfg) is None, "任务结束后 checkpoint 没清掉"
+
+
+def test_double_approve_does_not_drive_the_same_thread_twice(tmp_path):
+    """连点两次确认只能生效一次——同一个 checkpoint 被跑两遍会重复执行工具。"""
+    client = TestClient(_app(tmp_path, WriteLLM()))
+    client.post("/send", json={"goal": "写文件"})
+    assert _wait_pending(client) is not None
+
+    first = client.post("/approve", json={"ok": True})
+    second = client.post("/approve", json={"ok": True})
+    assert first.status_code == 200
+    assert second.status_code == 409
 
 
 def test_approve_without_pending_is_409(tmp_path):

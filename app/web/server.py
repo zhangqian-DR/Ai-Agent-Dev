@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import queue
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.agent.loop import run_agent
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from app.agent.loop import AgentRunner
 from app.llm.client import LLMClient
 from app.store.db import Store
 from app.tools.registry import build_tools
@@ -20,23 +21,28 @@ _STATIC = Path(__file__).parent / "static"
 
 
 class Session:
-    """单会话、单任务串行。agent 在后台线程跑，页面 1 秒轮询。"""
+    """单会话、单任务串行。agent 在后台线程跑，页面 1 秒轮询。
+
+    确认闸不再阻塞线程：图撞上闸就**返回**，把待确认的操作挂在 ``pending`` 上，
+    线程随之结束；页面回答之后另起一个线程从 checkpoint 恢复。所以「等待确认」
+    期间是没有线程在跑的——这也意味着用户关掉页面不会再挂住任何东西，
+    重新打开还能接着答（之前那套 30 秒失联超时因此不再需要）。
+
+    - ``running``：任务进行中，**含等待确认**。/send 靠它挡住并发任务。
+    - ``driving``：当前真的有线程在跑图。防止连点确认把同一个 thread 跑两遍。
+    """
 
     def __init__(self):
         self.events = queue.Queue()
-        self.pending = None                  # {"id", "name", "preview"}
-        self._seq = 0                        # 确认闸的递增编号，见 confirm()
+        self.pending = None                  # {"id", "actions": [{"name","preview"}...]}
+        self._seq = 0                        # 确认闸的递增编号，页面靠它判重
         self.plan: list[str] = []
         self.plan_current = 0
         self.running = False
+        self.driving = False
         self.session_id = None
-        self.last_poll = time.time()         # 页面还活着的唯一凭据，见 confirm()
-        self._approved = threading.Event()
-        self._ok = False
+        self.runner = None                   # AgentRunner，start 与 resume 共用同一个
         self._lock = threading.Lock()
-
-    def note_poll(self):
-        self.last_poll = time.time()
 
     def start(self) -> bool:
         """抢占运行权。已经在跑就返回 False——否则两个 agent 会同时改同一批文件。"""
@@ -46,36 +52,17 @@ class Session:
             self.running = True
             return True
 
-    def confirm(self, action, poll_gap=30.0, tick=1.0):
-        """在 agent 线程里调用，阻塞等前端点确认。
+    def take_wheel(self) -> bool:
+        """抢占「正在跑图」这件事，防止连点确认导致同一个 thread 被跑两遍。"""
+        with self._lock:
+            if self.driving:
+                return False
+            self.driving = True
+            return True
 
-        不能无限等：用户直接关掉页面时没人会来应答，线程就永久挂在这里，
-        running 一直是 True，之后每次 /send 都 409，只能重启进程。页面每秒
-        轮询一次，所以"超过 poll_gap 没有轮询"就是页面没了，按拒绝处理收场——
-        拒绝会当成工具结果喂回模型，任务能自己跑完并释放运行权。
-        """
-        # 每次确认给一个递增 id：页面靠它认出"这是新的一次确认"。少了 id 它只能
-        # 记"当前画着一张卡没有"，而模型一轮里连发两个 write_file 时，两次确认
-        # 之间 pending 变空的窗口只有一次写盘那么长，页面 1 秒轮询根本看不到，
-        # 于是第二张卡永远不画，agent 线程永久卡在下面的 wait 上。
-        #
-        # clear 必须在挂 pending 之前：反过来的话，前端在这两行之间抢答一次，
-        # resolve 的 set 会被随后的 clear 抹掉，同样是永久阻塞。
-        self._approved.clear()
+    def set_pending(self, payload: dict):
         self._seq += 1
-        self.pending = dict(action, id=self._seq)
-        try:
-            while not self._approved.wait(tick):
-                if time.time() - self.last_poll > poll_gap:
-                    self._ok = False         # 页面失联，当作用户拒绝
-                    break
-        finally:
-            self.pending = None
-        return self._ok
-
-    def resolve(self, ok: bool):
-        self._ok = ok
-        self._approved.set()
+        self.pending = dict(payload, id=self._seq)
 
     def drain(self):
         out = []
@@ -86,6 +73,12 @@ class Session:
 
 def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     store = store or Store(str(cfg.db_path))
+    # checkpoint 单独一个库文件：它和 agent.db 的锁、生命周期是两回事，混在一起
+    # 只会让退出顺序更难理清。SqliteSaver 是上下文管理器，这里手动进入、
+    # 在 lifespan 收尾时退出——测试里 TestClient 不带 with 时不跑 lifespan，
+    # 所以不能把「进入」也放进去，否则 saver 是空的。
+    checkpoint_cm = SqliteSaver.from_conn_string(str(cfg.checkpoint_path))
+    checkpointer = checkpoint_cm.__enter__()
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -94,6 +87,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         # agent 跑在 daemon 线程里，进程退出时它可能还握着这个 store——但那条线
         # 走到底也只是写失败，比让文件一直被占住强。
         store.close()
+        checkpoint_cm.__exit__(None, None, None)
 
     app = FastAPI(title="win-ai-agent", lifespan=lifespan)
     provider = provider or build_provider(cfg)
@@ -101,6 +95,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     sess = Session()
     app.state.provider = provider          # 让测试能验证默认这条路建对了没
     app.state.session = sess
+    app.state.checkpointer = checkpointer
 
     def _emit(ev: dict):
         t = ev.get("type")
@@ -126,21 +121,38 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             store.add_message(sess.session_id, t, ev.get("content", ""),
                               status="" if ev.get("ok", True) else "error")
 
-    def _work(goal: str):
+    def _finish(thread_id: str):
+        sess.pending = None
+        sess.running = False
+        # checkpoint 只用来跨越确认闸，任务结束就没有消费者了——对话记录本来就在
+        # agent.db 里。不删的话这个库只增不减，而且没人会去看。
+        # 真要做「关掉程序明天接着批」，改的就是这一行。
         try:
-            sess.session_id = store.create_session(goal[:40] or "未命名会话")
-            store.add_message(sess.session_id, "user", goal)
-            tools = build_tools(cfg, store, provider)
-            run_agent(goal, llm=the_llm, tools=tools, cfg=cfg,
-                      emit=_emit, confirm=sess.confirm,
-                      memories=store.get_memories())
-        except Exception as e:
-            # 走 _emit 而不是直接塞队列：不落库的话页面上闪一下就没了，
-            # 下次打开回放的是数据库，用户根本不知道上次为什么没有结果。
-            _emit({"type": "final", "content": f"出错：{type(e).__name__}: {e}", "ok": False})
-        finally:
-            sess.pending = None
-            sess.running = False
+            checkpointer.delete_thread(thread_id)
+        except Exception:
+            pass                            # 清理失败不该影响任务本身的收场
+
+    def _drive(step, thread_id: str):
+        """在后台线程里把图推进到下一个停点：要么任务结束，要么撞上确认闸。
+
+        撞上闸时线程就结束了——等待确认期间没有任何线程挂着。
+        """
+        def body():
+            try:
+                r = step()
+                if r["done"]:
+                    _finish(thread_id)
+                else:
+                    sess.set_pending(r["pending"])
+            except Exception as e:
+                # 走 _emit 而不是直接塞队列：不落库的话页面上闪一下就没了，
+                # 下次打开回放的是数据库，用户根本不知道上次为什么没有结果。
+                _emit({"type": "final", "content": f"出错：{type(e).__name__}: {e}", "ok": False})
+                _finish(thread_id)
+            finally:
+                sess.driving = False
+
+        threading.Thread(target=body, daemon=True).start()
 
     @app.post("/send")
     def send(body: dict):
@@ -148,16 +160,25 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         if not goal:
             return JSONResponse({"ok": False, "error": "目标不能为空"}, status_code=400)
         if not sess.start():
-            return JSONResponse({"ok": False, "error": "上一个任务还在跑，等它结束或刷新页面"},
+            return JSONResponse({"ok": False, "error": "上一个任务还在跑，等它结束或回答待确认的操作"},
                                 status_code=409)
         sess.plan = []
         sess.plan_current = 0
-        threading.Thread(target=_work, args=(goal,), daemon=True).start()
+        sess.pending = None
+        sess.take_wheel()
+        sess.session_id = store.create_session(goal[:40] or "未命名会话")
+        store.add_message(sess.session_id, "user", goal)
+        # ToolSet 与 runner 整轮共用：plan/plan_current 挂在 ToolSet 上，
+        # 每次恢复都新建的话计划面板会在确认之后凭空清空。
+        sess.runner = AgentRunner(llm=the_llm, tools=build_tools(cfg, store, provider),
+                                  cfg=cfg, emit=_emit, checkpointer=checkpointer)
+        thread_id = str(sess.session_id)
+        memories = store.get_memories()
+        _drive(lambda: sess.runner.start(goal, memories, thread_id), thread_id)
         return {"ok": True}
 
     @app.get("/poll")
     def poll():
-        sess.note_poll()                   # 确认闸靠这个判断页面还在不在
         return {
             "events": sess.drain(),
             "pending": sess.pending,
@@ -173,7 +194,12 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
     def approve(body: dict):
         if sess.pending is None:
             return JSONResponse({"ok": False, "error": "当前没有待确认的操作"}, status_code=409)
-        sess.resolve(bool((body or {}).get("ok")))
+        if not sess.take_wheel():          # 连点两次确认不能把同一个 thread 跑两遍
+            return JSONResponse({"ok": False, "error": "正在处理上一次确认"}, status_code=409)
+        ok = bool((body or {}).get("ok"))
+        sess.pending = None
+        thread_id = str(sess.session_id)
+        _drive(lambda: sess.runner.resume(ok, thread_id), thread_id)
         return {"ok": True}
 
     @app.get("/history")

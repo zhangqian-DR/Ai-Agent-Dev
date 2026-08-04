@@ -17,9 +17,11 @@ import json
 from typing import Annotated, Any, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import Command, interrupt
 
 from app.agent.prompt import system_prompt
 from app.agent.context import history_size, trim_history
@@ -70,7 +72,7 @@ def _shrink_tool_args(msg, value_limit: int = _ARG_VALUE_LIMIT) -> None:
         msg.additional_kwargs.pop("tool_calls", None)
 
 
-def build_graph(*, llm, tools, cfg, emit, confirm):
+def build_graph(*, llm, tools, cfg, emit, checkpointer):
     """把两个节点接成图。所有外部依赖靠闭包带进去，节点本身只读写 state。"""
 
     def agent_node(state: AgentState) -> dict:
@@ -114,7 +116,10 @@ def build_graph(*, llm, tools, cfg, emit, confirm):
                     # 真正的错误由它抛出来喂回模型反思
                     preview = f"（无法生成预览：{type(e).__name__}: {e}）"
                 actions.append({"name": c["name"], "preview": preview})
-            approved = confirm({"actions": actions})
+            # 图在这里**停住并返回**，不占线程。恢复时整个节点从头重跑，
+            # 这一行会直接返回恢复值而不再中断——所以上面这段只算预览、
+            # 不能有副作用，下面的执行才是真正动手的地方。
+            approved = interrupt({"actions": actions})
 
         for c in calls:
             name, args = c["name"], c["args"]
@@ -172,28 +177,68 @@ def build_graph(*, llm, tools, cfg, emit, confirm):
     g.add_edge(START, "agent")
     g.add_conditional_edges("agent", after_agent, {"tools": "tools", END: END})
     g.add_conditional_edges("tools", after_tools, {"agent": "agent", END: END})
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)
+
+
+class AgentRunner:
+    """一轮任务的执行器：起一轮、或从确认闸恢复。
+
+    ``start`` / ``resume`` 都是**跑到下一个停点为止**——要么任务结束，要么撞上
+    确认闸。撞上闸时图直接返回，不占线程；页面回答之后再 ``resume``。
+    这就是 LangGraph 换回来的东西：暂停/恢复是一个原语，确认闸只是它的触发器。
+    """
+
+    def __init__(self, *, llm, tools, cfg, emit, checkpointer):
+        self.cfg, self.emit = cfg, emit
+        self.graph = build_graph(llm=llm, tools=tools, cfg=cfg, emit=emit,
+                                 checkpointer=checkpointer)
+
+    def _config(self, thread_id: str) -> dict:
+        # recursion_limit 数的是**节点执行次数**，不是模型轮次：一个 ReAct 回合是
+        # agent + tools 两个节点。所以要让 max_steps 保持「最多几轮模型调用」这个
+        # 含义（页面上的步数条也照旧显示它），限额得乘 2。
+        # 不要写成 *2+1：多出来的那一次落在 agent 上，会白多跑一轮模型调用。
+        return {"configurable": {"thread_id": thread_id},
+                "recursion_limit": self.cfg.max_steps * 2}
+
+    def start(self, goal: str, memories: list, thread_id: str) -> dict:
+        init: AgentState = {
+            "messages": [SystemMessage(content=system_prompt(self.cfg.work_dir, memories)),
+                         HumanMessage(content=goal)],
+            "step": 0, "plan": [], "plan_current": 0,
+            "counts": {}, "last_sig": None, "consecutive": 0, "final": None,
+        }
+        return self._drive(init, thread_id)
+
+    def resume(self, approved: bool, thread_id: str) -> dict:
+        return self._drive(Command(resume=bool(approved)), thread_id)
+
+    def _drive(self, payload, thread_id: str) -> dict:
+        """返回 ``{"done": True, "answer": str}`` 或 ``{"done": False, "pending": {...}}``。"""
+        try:
+            out = self.graph.invoke(payload, config=self._config(thread_id))
+        except GraphRecursionError:
+            stop = "已达最大步数，停止。"
+            self.emit({"type": "final", "content": stop, "ok": True})
+            return {"done": True, "answer": stop}
+        pending = out.get("__interrupt__")
+        if pending:
+            return {"done": False, "pending": pending[0].value}
+        if out["final"] is not None:
+            return {"done": True, "answer": out["final"]}
+        return {"done": True, "answer": out["messages"][-1].content or ""}
 
 
 def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
-    graph = build_graph(llm=llm, tools=tools, cfg=cfg, emit=emit, confirm=confirm)
-    init: AgentState = {
-        "messages": [SystemMessage(content=system_prompt(cfg.work_dir, memories)),
-                     HumanMessage(content=goal)],
-        "step": 0, "plan": [], "plan_current": 0,
-        "counts": {}, "last_sig": None, "consecutive": 0, "final": None,
-    }
-    # recursion_limit 数的是**节点执行次数**，不是模型轮次：一个 ReAct 回合是
-    # agent + tools 两个节点。所以要让 max_steps 保持「最多几轮模型调用」这个
-    # 含义（页面上的步数条也照旧显示它），限额得乘 2。
-    # 不要写成 *2+1：多出来的那一次落在 agent 上，会白多跑一轮模型调用。
-    limit = cfg.max_steps * 2
-    try:
-        out = graph.invoke(init, config={"recursion_limit": limit})
-    except GraphRecursionError:
-        stop = "已达最大步数，停止。"
-        emit({"type": "final", "content": stop, "ok": True})
-        return stop
-    if out["final"] is not None:
-        return out["final"]
-    return out["messages"][-1].content or ""
+    """一路跑到底，撞上确认闸就用 ``confirm`` 回调同步问一次。
+
+    web 层**不用**这个——它要的是「停下来、把闸交给页面、稍后恢复」，直接使唤
+    ``AgentRunner``。这个包装留给测试和命令行：一个函数跑完一轮，省得每处都自己
+    写 start/resume 循环。
+    """
+    runner = AgentRunner(llm=llm, tools=tools, cfg=cfg, emit=emit,
+                         checkpointer=InMemorySaver())
+    r = runner.start(goal, memories, "local")
+    while not r["done"]:
+        r = runner.resume(confirm(r["pending"]), "local")
+    return r["answer"]

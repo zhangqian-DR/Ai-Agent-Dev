@@ -28,6 +28,16 @@ class Config:
     # 单次写入的内容上限，挡畸形大文件（挡不住上下文膨胀，见 fs.write_file）
     max_write_chars: int = 64_000
 
+    @property
+    def checkpoint_path(self) -> Path:
+        """LangGraph 的 checkpoint 库，和 agent.db 分开放。
+
+        两者的锁和生命周期是两回事（一个我们自己管，一个 SqliteSaver 自己管），
+        混在一个文件里只会让退出顺序更难理清。跟着 db_path 走，所以「不能放进
+        work_dir」那道校验对它同样有效。
+        """
+        return self.db_path.with_suffix(".checkpoints.sqlite")
+
 
 def load_config(path: str = "config.json") -> Config:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))

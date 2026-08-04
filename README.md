@@ -40,8 +40,9 @@ copy config.example.json config.json
 **一轮里的多个危险操作合成一张卡**，一并确认或一并拒绝（模型常常一次就发好几个
 `write_file`）。同一轮里自动放行的工具不进这张卡，照常执行。
 
-确认时 agent 线程是真的停在那里等。等待期间页面超过 30 秒没有轮询（多半是被关掉了），
-按「拒绝」处理并继续往下跑——否则线程会永久挂着，运行权也就永远释放不出来。
+**等待确认时没有任何线程挂着**：图撞上闸就存 checkpoint 并返回，线程随之结束；
+你点了确认之后再另起一个线程从 checkpoint 接着跑。所以关掉页面也不会挂住东西，
+隔多久回来那道闸都还在，答完照样往下走。
 
 ## 安全边界
 
@@ -57,6 +58,9 @@ copy config.example.json config.json
 
 - `agent.db` —— 会话、消息、长期记忆（SQLite 单文件）。默认在程序目录，可用 `db_path` 改。
   **不能放进 `work_dir`**（agent 对那里有写权限，会改到自己的记忆）——放了直接拒绝启动。
+- `agent.checkpoints.sqlite` —— LangGraph 的 checkpoint，跟着 `db_path` 走、和 `agent.db`
+  分开放（两者的锁和生命周期各归各管）。它只用来跨越确认闸，**任务一结束就删掉那一轮**，
+  所以不会无界增长。
 - 写文件前自动逐代备份为 `<原名>.<时间戳>.bak`。备份不设上限，长跑后需要人工清理；
   `search_in_files` 会跳过它们，否则搜索结果很快全是历代旧副本。
 
@@ -100,7 +104,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-128 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+133 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·
@@ -111,6 +115,13 @@ ReAct 循环由 **LangGraph 的 `StateGraph`** 驱动（`agent ⇄ tools` 一个
 pydantic 参数模型自动生成。**没有用预制的 `ToolNode`**——工具执行要过确认闸、走熔断、
 按类型发不同事件，包一层比自己写更长。`max_steps` 仍然是「最多几轮模型调用」，
 换算成 `recursion_limit` 时要乘 2（它数的是节点执行次数，一个回合两个节点）。
+
+确认闸走 **`interrupt()` + `SqliteSaver`**：图停住、存 checkpoint、返回，页面回答后
+`Command(resume=...)` 接着跑。因为恢复时**整个节点会从头重跑**，闸必须在任何副作用
+之前、且一轮只有一个——这就是「一轮里的危险操作合成一张卡」的由来，不只是 UX。
+
+`app/agent/loop.py` 的 `AgentRunner` 是 web 层用的接口（`start` / `resume`，各跑到下一个
+停点）；`run_agent()` 是给测试和命令行的包装，用一个 `confirm` 回调把整轮跑完。
 
 八个工具：`list_dir` `read_file` `search_in_files` `web_search` `update_plan` `save_memory`
 （自动放行）、`write_file` `run_command`（过安全阀）。`fs.preview_write` 只给确认卡片生成
@@ -126,8 +137,12 @@ diff，没有注册成工具，模型看不到它。
 
 ## 已知限制
 
-- 单会话、单任务串行。上一个任务没跑完时发新目标会被拒（否则两个 agent 会互相覆盖文件）。
+- 单会话、单任务串行。上一个任务没跑完（**含等着你确认**）时发新目标会被拒，
+  否则两个 agent 会互相覆盖文件。
 - 页面 1 秒轮询，没有流式打字机效果。
+- checkpoint 只跨越确认闸，**不支持"关掉程序明天接着批"**：`AgentRunner` 和 `ToolSet`
+  都在内存里，进程一退就没了，重启后那一轮无法恢复。要做的话得把这两样也持久化，
+  并且不要在任务结束时删 checkpoint。
 - `run_command` 用 `shell=True`。在"白名单外全部人工确认 + 用户看到完整命令 + cwd 锁死沙箱"
   三重前提下 MVP 可接受，Phase 2 收紧为 `shell=False` + 参数数组。
 - 程序运行期间 `agent.db` 会被 sqlite 占用（删不掉也移不走），正常退出时释放。
