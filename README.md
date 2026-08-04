@@ -90,6 +90,7 @@ copy config.example.json config.json
 | `db_path` | `./agent.db` | 数据库位置 |
 | `search_provider` | `dashscope` | 见下 |
 | `port` | `8000` | 被占用时自动 +1 |
+| `verify_cmd` | 空 | 验收命令，如 `pytest -q`。**留空就整个关掉**，见下 |
 
 ### 联网搜索选哪个
 
@@ -112,7 +113,7 @@ copy config.example.json config.json
 `max_file_bytes` 单文件 >1MB 拒读、`read_output_limit` 返回给模型的内容 ≤8000 字符、
 `cmd_output_limit` 命令输出 ≤2000 字符、`cmd_timeout` 命令 30 秒超时、
 `max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步、
-`max_memories` 注入提示词的记忆条数 ≤50。
+`max_memories` 注入提示词的记忆条数 ≤50、`max_verify_rounds` 验收最多重试 2 轮。
 
 ## 开发
 
@@ -120,11 +121,20 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-177 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+186 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·
 `app/web/` FastAPI 与静态页。各层接口明确，可独立测试。
+
+**验收闸**（`verify_cmd`，默认留空 = 关闭）：模型说完成时，先跑一遍你配的验收命令
+（比如 `pytest -q`）。不过就把失败输出喂回去继续修，最多 `max_verify_rounds` 轮；
+还不过就如实说"改完了但没通过"，而不是硬说完成。只在**真动过东西**之后才跑
+（判据复用安全阀的 `needs_confirmation`——需要确认的操作正是会改东西的那些），
+纯问答和只读命令不会触发。
+
+这道闸和确认闸位置类似、方向相反：确认闸拦危险操作，它拦"没验证就说完成"。
+`run_command` 本来就在工具箱里、模型随时能跑测试，区别在于那是**可选的**，全凭自觉。
 
 **错误分三类**（`app/agent/errors.py`）：可重试（限流 / 5xx / 网络）、可修正（参数不对 /
 路径越界，喂回去让模型自己修）、终止（key 无效 / 模型名不对，重试没有意义）。给用户的是

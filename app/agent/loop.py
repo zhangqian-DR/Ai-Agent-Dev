@@ -28,6 +28,7 @@ from app.agent.context import history_size, trim_history
 from app.agent.errors import explain
 from app.llm.client import parse_tool_calls
 from app.safety.commands import needs_confirmation
+from app.tools import shell
 
 # 历史里单个参数值保留的字符数（工具已执行完，模型不需要再看一遍完整内容）
 _ARG_VALUE_LIMIT = 200
@@ -45,7 +46,10 @@ class AgentState(TypedDict):
     counts: dict
     last_sig: Optional[str]
     consecutive: int
-    # 非 None 就是「不是模型给的最终回答」的收场（熔断终止），直接结束
+    # 这一轮有没有真的动过东西（写文件、跑非只读命令）。只有动过才值得验收。
+    touched: bool
+    verify_rounds: int
+    # 非 None 就是收场了：熔断终止、模型层出错、或验收给出的结论
     final: Optional[str]
 
 
@@ -76,6 +80,16 @@ def _shrink_tool_args(msg, value_limit: int = _ARG_VALUE_LIMIT) -> None:
 def build_graph(*, llm, tools, cfg, emit, checkpointer):
     """把两个节点接成图。所有外部依赖靠闭包带进去，节点本身只读写 state。"""
 
+    def verify_due(state: AgentState) -> bool:
+        """这一轮该不该跑验收命令。
+
+        三个条件缺一不可：配了命令、真的动过东西、还没试满轮数。
+        「动过东西」用 needs_confirmation 判——它本来就是"这个操作会不会改东西"
+        的分类，不必另造一套；只读命令和纯问答因此不会触发验收。
+        """
+        return (bool(cfg.verify_cmd) and state["touched"]
+                and state["verify_rounds"] < cfg.max_verify_rounds)
+
     def agent_node(state: AgentState) -> dict:
         step = state["step"] + 1
         # 只为这一次调用裁剪，不把裁剪结果写回 state：state 留着完整历史，
@@ -97,7 +111,8 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
         # 两个都发的话页面上同一段话会显示两遍，数据库里也会存两条。
         if reply.content and calls:
             emit({"type": "assistant", "content": reply.content})
-        if not calls:
+        # 该验收时先不发 final——收没收场由 verify 节点说了算
+        if not calls and not verify_due(state):
             emit({"type": "final", "content": reply.content or "", "ok": True})
         return {"messages": [reply], "step": step}
 
@@ -106,6 +121,7 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
         counts = dict(state["counts"])
         last_sig, consecutive = state["last_sig"], state["consecutive"]
         plan, plan_current = state["plan"], state["plan_current"]
+        touched = state["touched"]
         out: list[Any] = []
 
         calls = parse_tool_calls(reply)
@@ -143,6 +159,9 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
                     out.append(ToolMessage(content=result, tool_call_id=c["id"]))
                     continue
                 result = tools.execute(name, args)
+                # 「动过东西」直接复用安全阀的分类：需要人工确认的操作正是会改
+                # 东西的那些。只读命令和纯查询不算，免得给纯问答也跑一遍验收。
+                touched = touched or needs_confirmation(name, args)
             except Exception as e:
                 # 工具异常一律喂回去让模型自己修（这类基本都是 CORRECTABLE），
                 # 但用 explain 而不是干巴巴的类名——比如沙箱越界要明说「别再试
@@ -175,12 +194,54 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
         # 的「同 id 替换」写回去——只在内存里改对象的话，带 checkpointer 时不落盘。
         _shrink_tool_args(reply)
         return {"messages": [reply, *out], "counts": counts, "last_sig": last_sig,
-                "consecutive": consecutive, "plan": plan, "plan_current": plan_current}
+                "consecutive": consecutive, "plan": plan, "plan_current": plan_current,
+                "touched": touched}
+
+    def verify_node(state: AgentState) -> dict:
+        """模型说完成了，跑一遍验收命令看它说得对不对。
+
+        这道闸和确认闸的位置类似，方向相反：确认闸拦危险操作，这道闸拦
+        「没验证就说完成」。run_command 本来就在工具箱里、模型随时能跑测试，
+        区别在于那是**可选的**，全凭它自觉；这里是流程里的一步。
+        """
+        rounds = state["verify_rounds"] + 1
+        ok, out = shell.run_and_check(cfg.work_dir, cfg.verify_cmd,
+                                      cfg.cmd_timeout, cfg.cmd_output_limit)
+        emit({"type": "tool", "name": f"验收 {cfg.verify_cmd}", "result": out,
+              "ok": ok, "badge": "通过" if ok else "未通过"})
+
+        said = state["messages"][-1].content or ""
+        if ok:
+            emit({"type": "final", "content": said, "ok": True})
+            return {"verify_rounds": rounds, "final": said}
+        if rounds >= cfg.max_verify_rounds:
+            # 如实说，不硬说完成——这正是这道闸存在的意义
+            msg = (f"{said}\n\n⚠️ 验收未通过：`{cfg.verify_cmd}` 仍然失败，"
+                   f"以上改动没有通过验证。")
+            emit({"type": "final", "content": msg, "ok": False})
+            return {"verify_rounds": rounds, "final": msg}
+
+        # 把失败输出喂回去接着修。用 HumanMessage 而不是 ToolMessage：
+        # 这次验收不对应任何 tool_call，挂个孤儿 ToolMessage 会被协议拒掉。
+        nudge = HumanMessage(content=(
+            f"验收命令 `{cfg.verify_cmd}` 没有通过：\n\n{out}\n\n"
+            f"先修好再收尾，不要直接回复完成。"))
+        # 顺手把熔断的两本账清零。模型刚拿到新信息，回头重读源文件想弄清哪里
+        # 不对是**正当**的，不是原地打转——真机上就因此被误杀过一次：验收一红，
+        # 它重读了两遍源文件，第 3 次就被掐了。verify_rounds 仍然兜着底，
+        # 不会因为清零变成无限循环。
+        return {"messages": [nudge], "verify_rounds": rounds,
+                "counts": {}, "last_sig": None, "consecutive": 0}
 
     def after_agent(state: AgentState) -> str:
         if state["final"] is not None:          # 模型层出错，已经收过场了
             return END
-        return "tools" if parse_tool_calls(state["messages"][-1]) else END
+        if parse_tool_calls(state["messages"][-1]):
+            return "tools"
+        return "verify" if verify_due(state) else END
+
+    def after_verify(state: AgentState) -> str:
+        return END if state["final"] is not None else "agent"
 
     def after_tools(state: AgentState) -> str:
         return END if state["final"] is not None else "agent"
@@ -188,9 +249,12 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer):
     g = StateGraph(AgentState)
     g.add_node("agent", agent_node)
     g.add_node("tools", tools_node)
+    g.add_node("verify", verify_node)
     g.add_edge(START, "agent")
-    g.add_conditional_edges("agent", after_agent, {"tools": "tools", END: END})
+    g.add_conditional_edges("agent", after_agent,
+                            {"tools": "tools", "verify": "verify", END: END})
     g.add_conditional_edges("tools", after_tools, {"agent": "agent", END: END})
+    g.add_conditional_edges("verify", after_verify, {"agent": "agent", END: END})
     return g.compile(checkpointer=checkpointer)
 
 
@@ -220,7 +284,8 @@ class AgentRunner:
             "messages": [SystemMessage(content=system_prompt(self.cfg.work_dir, memories)),
                          HumanMessage(content=goal)],
             "step": 0, "plan": [], "plan_current": 0,
-            "counts": {}, "last_sig": None, "consecutive": 0, "final": None,
+            "counts": {}, "last_sig": None, "consecutive": 0,
+            "touched": False, "verify_rounds": 0, "final": None,
         }
         return self._drive(init, thread_id)
 

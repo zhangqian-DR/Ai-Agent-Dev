@@ -279,7 +279,9 @@ function handle(e){
     if(changed)planCard(lastPlan);    // 只在清单本身变了时画卡片，推进时不刷屏
   }else if(e.type==='tool'){
     var rejected=e.ok===false;
-    toolCard(e.name,e.result,rejected?'已拒绝':'自动放行',rejected?'skip':'');
+    // badge 是可选的：验收闸失败该说「未通过」而不是「已拒绝」，
+    // 颜色仍按 ok 走（红/常规），只有措辞由发事件的那一方决定。
+    toolCard(e.name,e.result,e.badge||(rejected?'已拒绝':'自动放行'),rejected?'skip':'');
   }else if(e.type==='final'){
     var bad=e.ok===false;
     msg(bad?'err':'final',bad?'✖':'✅',e.content);

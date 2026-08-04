@@ -1,4 +1,27 @@
 from app.safety.commands import is_readonly, needs_confirmation
+from app.tools.shell import run_and_check
+
+
+def test_run_and_check_reports_success(tmp_path):
+    """验收闸要的是「过没过」这个布尔值，不是从输出里认 [exit=0] 那几个字。"""
+    ok, out = run_and_check(tmp_path, "python -c \"print('hi')\"")
+    assert ok is True
+    assert "hi" in out
+
+
+def test_run_and_check_reports_failure(tmp_path):
+    ok, out = run_and_check(tmp_path, "python -c \"import sys; sys.exit(3)\"")
+    assert ok is False
+    assert "exit=3" in out
+
+
+def test_run_and_check_timeout_is_a_failure(tmp_path):
+    """验收命令卡住不能当成通过。"""
+    ok, out = run_and_check(tmp_path, "python -c \"import time; time.sleep(30)\"", timeout=2)
+    assert ok is False
+    assert "超时" in out
+
+
 
 def test_readonly_whitelist():
     assert is_readonly("git status")

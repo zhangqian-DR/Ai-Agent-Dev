@@ -30,6 +30,11 @@ class Config:
     # 拼进 system prompt 的记忆条数上限。全部记忆是每一轮都无条件注入的，
     # 不设上限提示词会一直膨胀。只限注入，库里一条不删。
     max_memories: int = 50
+    # 验收命令：改完东西之后跑它，不过就把失败输出喂回去继续修。
+    # **留空 = 整个关掉**，退回"模型说完成就是完成"。留空是默认，因为
+    # "随手写个脚本"这类任务根本没有测试可跑，不该被验收卡住。
+    verify_cmd: str = ""
+    max_verify_rounds: int = 2
 
     @property
     def checkpoint_path(self) -> Path:
@@ -74,4 +79,6 @@ def load_config(path: str = "config.json") -> Config:
         cmd_output_limit=_int("cmd_output_limit"),
         max_write_chars=_int("max_write_chars"),
         max_memories=_int("max_memories"),
+        verify_cmd=raw.get("verify_cmd", ""),
+        max_verify_rounds=_int("max_verify_rounds"),
     )

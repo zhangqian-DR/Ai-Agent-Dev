@@ -1,7 +1,8 @@
 import copy
 import json
 
-from langchain_core.messages import AIMessage, ToolMessage, convert_to_openai_messages
+from langchain_core.messages import (AIMessage, HumanMessage, ToolMessage,
+                                     convert_to_openai_messages)
 
 from app.agent.loop import run_agent
 from app.config import Config
@@ -152,6 +153,110 @@ def test_rejecting_the_gate_skips_only_the_gated_calls(tmp_path):
     assert tools_ev["read_file"]["ok"] is True
     assert tools_ev["write_file"]["ok"] is False
     assert not (tmp_path / "b.txt").exists()
+
+
+# ---------- 验收闸：改完东西不能只凭模型自己说「完成了」 ----------
+
+def _verify_run(tmp_path, llm, verify_cmd, rounds=2):
+    cfg, tools = _tools(tmp_path)
+    cfg.verify_cmd = verify_cmd
+    cfg.max_verify_rounds = rounds
+    events = []
+    ans = run_agent("目标", llm=llm, tools=tools, cfg=cfg,
+                    emit=events.append, confirm=lambda a: True, memories=[])
+    return ans, events
+
+
+_PASS = "python -c \"pass\""
+_FAIL = "python -c \"import sys; sys.exit(1)\""
+
+
+def test_no_verify_cmd_keeps_the_old_behaviour(tmp_path):
+    """没配验收命令就整个不启用——「随手写个脚本」这类任务没有测试可跑，
+    不该被卡住。"""
+    _, events = _verify_run(tmp_path, ScriptLLM(
+        _call("write_file", {"path": "a.txt", "content": "x"}), _done("完成")), "")
+
+    assert not [e for e in events if e["type"] == "tool" and "验收" in e["name"]]
+    assert events[-1]["type"] == "final" and events[-1]["ok"] is True
+
+
+def test_read_only_task_is_not_verified(tmp_path):
+    """什么都没改就别跑验收——纯问答跑一遍测试既慢又莫名其妙。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    _, events = _verify_run(tmp_path, ScriptLLM(
+        _call("read_file", {"path": "a.txt"}), _done("看完了")), _PASS)
+
+    assert not [e for e in events if e["type"] == "tool" and "验收" in e["name"]]
+
+
+def test_verify_runs_after_a_write_and_passes(tmp_path):
+    """动过文件就得验收一次，过了才允许收尾。"""
+    ans, events = _verify_run(tmp_path, ScriptLLM(
+        _call("write_file", {"path": "a.txt", "content": "x"}), _done("改好了")), _PASS)
+
+    checks = [e for e in events if e["type"] == "tool" and "验收" in e["name"]]
+    assert len(checks) == 1 and checks[0]["ok"] is True
+    assert ans == "改好了"
+    assert events[-1]["type"] == "final" and events[-1]["ok"] is True
+
+
+def test_failed_verify_is_fed_back_and_the_agent_keeps_going(tmp_path):
+    """验收不过要把失败输出喂回去让它继续修，而不是就这么收尾。"""
+    llm = ScriptLLM(
+        _call("write_file", {"path": "a.txt", "content": "坏的"}),
+        _done("我改好了"),                       # 第一次声称完成 → 验收会红
+        _call("write_file", {"path": "a.txt", "content": "好的"}, cid="2"),
+        _done("这次真好了"))
+    cfg, tools = _tools(tmp_path)
+    cfg.verify_cmd = _FAIL
+    cfg.max_verify_rounds = 2
+    events = []
+    run_agent("目标", llm=llm, tools=tools, cfg=cfg,
+              emit=events.append, confirm=lambda a: True, memories=[])
+
+    fed = [m.content for msgs in llm.seen for m in msgs
+           if isinstance(m, HumanMessage) and "验收" in m.content]
+    assert fed, "失败输出没有喂回模型"
+    assert "exit=1" in fed[0]
+    assert llm.n > 2, "模型应当被叫回去继续改"
+
+
+def test_verify_nudge_resets_the_loop_breaker(tmp_path):
+    """验收失败会把模型叫回去重查，这时重读同一个文件是**正当**的。
+
+    真机踩到过：验收一红，模型回头重读源文件想弄清哪里不对，读到第 3 次就被
+    熔断当成死循环掐了。熔断防的是"原地打转"，而拿到新信息之后回头看不是
+    打转——所以验收喂回失败时要把这两本账清零。verify_rounds 仍然兜着底，
+    不会因此变成无限循环。
+    """
+    (tmp_path / "b.txt").write_text("不变的内容", encoding="utf-8")
+    read_b = {"path": "b.txt"}
+    llm = ScriptLLM(
+        _call("read_file", read_b, cid="1"),                        # 累计 1
+        _call("read_file", read_b, cid="2"),                        # 累计 2 → 提醒
+        _call("write_file", {"path": "a.txt", "content": "x"}, cid="3"),
+        _done("我改好了"),                                           # → 验收红，喂回
+        _call("read_file", read_b, cid="4"),                        # 不清零的话这里第 3 次 → 熔断
+        _done("这次真好了"))                                          # → 验收再红 → 收场
+
+    ans, events = _verify_run(tmp_path, llm, _FAIL, rounds=2)
+
+    assert "死循环" not in ans, "验收把模型叫回来重查，不该被熔断误杀"
+    assert "验收未通过" in ans
+    assert len([e for e in events if e["type"] == "tool" and "验收" in e["name"]]) == 2
+
+
+def test_verify_gives_up_after_the_round_limit_and_says_so(tmp_path):
+    """一直不过就如实说「改完了但没通过」，不能硬说完成。"""
+    llm = ScriptLLM(_call("write_file", {"path": "a.txt", "content": "x"}), _done("完成了"))
+    ans, events = _verify_run(tmp_path, llm, _FAIL, rounds=2)
+
+    checks = [e for e in events if e["type"] == "tool" and "验收" in e["name"]]
+    assert len(checks) == 2, f"应当只试 2 轮，实际 {len(checks)}"
+    final = events[-1]
+    assert final["ok"] is False, "没通过验收不能标成绿色成功"
+    assert "验收未通过" in ans
 
 
 class _Boom:
