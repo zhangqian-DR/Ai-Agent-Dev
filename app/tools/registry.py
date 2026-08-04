@@ -104,8 +104,9 @@ class ToolSet:
             T(list_dir, "list_dir", "列出工作目录下某目录的内容", ListDirArgs),
             T(read_file, "read_file", "读取工作目录内的文本文件", ReadFileArgs),
             T(search_in_files, "search_in_files",
-              "在工作目录内搜代码/文本。按**字面子串**匹配，不是正则——"
-              "写 def\\s+add 之类的正则一定搜不到，直接写 def add 就行。",
+              "在工作目录内搜文件**内容**。按**字面子串**匹配，不是正则——"
+              "写 def\\s+add 之类的正则一定搜不到，直接写 def add 就行。"
+              "它不搜文件名：想按扩展名找文件请用 list_dir。",
               SearchArgs),
             T(write_file, "write_file", "写入/覆盖工作目录内的文件（会先给你确认）", WriteFileArgs),
             T(run_command, "run_command", "在工作目录内执行命令（危险命令会先确认）", RunCommandArgs),
