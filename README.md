@@ -5,6 +5,8 @@ Windows 本地 AI Coding Agent（MVP）。浏览器聊天，能读写文件、�
 
 ## 快速开始
 
+需要 **Python 3.12+**。
+
 ```bat
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -118,8 +120,8 @@ diff，没有注册成工具，模型看不到它。
 - 程序运行期间 `agent.db` 会被 sqlite 占用（删不掉也移不走），正常退出时释放。
   连接跨线程共享，所有读写都过同一把锁——没有锁的话退出时关连接会撞上 agent
   线程正在写，直接访问违规而不是抛异常。
-- Python 3.8 下 `duckduckgo-search` 只能用 5.3.1（6.x 依赖的 Rust 扩展没有 py38 wheel）。
-  升到 3.10+ 后可以换回 6.2.0。
+- `duckduckgo-search` 还锁在 5.3.1。当初锁它是因为 6.x 的 Rust 扩展没有 py38 wheel，
+  现在跑在 3.12 上，这个理由已经不成立，可以升，只是还没升。
 
 ## Phase 2
 
