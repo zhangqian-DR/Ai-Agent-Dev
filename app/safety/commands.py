@@ -46,9 +46,18 @@ def is_readonly(cmd: str) -> bool:
         return True
     return False
 
+# 自动放行的工具：只读、或只改 agent 自己的状态（计划面板、长期记忆）。
+# 这是**显式白名单**——没列进来的一律要人工确认，包括不认识的名字。
+# 反过来写（"认识的危险工具才拦"）是 fail-open：以后加一个会写盘的工具、
+# 忘了同步改这里，它就静默地自动放行，而这道闸是提示注入的最后一层兜底。
+AUTO_APPROVED = frozenset({
+    "list_dir", "read_file", "search_in_files", "web_search",
+    "update_plan", "save_memory",
+})
+
+
 def needs_confirmation(tool_name: str, args: dict) -> bool:
-    if tool_name == "write_file":
-        return True
     if tool_name == "run_command":
+        # 唯一按参数判的：命令在只读白名单内才放行，见 is_readonly
         return not is_readonly(args.get("cmd", ""))
-    return False
+    return tool_name not in AUTO_APPROVED

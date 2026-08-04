@@ -2,6 +2,7 @@ import pytest
 from langchain_core.tools import BaseTool
 
 from app.config import Config
+from app.safety.commands import AUTO_APPROVED
 from app.store.db import Store
 from app.tools.registry import build_tools
 from app.tools.web import SearchProvider
@@ -33,6 +34,26 @@ def test_tools_are_langchain_tools(tmp_path):
     模型侧的函数定义也由它自动生成，不必两处维护。"""
     for t in _ts(tmp_path).tools():
         assert isinstance(t, BaseTool), t
+
+
+def test_auto_approved_names_all_exist(tmp_path):
+    """自动放行名单里的每一项都得是真实存在的工具。
+
+    名单在 safety/，工具在 tools/，两边各改各的迟早对不上——名字写错一个，
+    那个工具就悄悄被收进了确认闸（或者更糟：改名之后名单里留了个空壳）。
+    """
+    names = {t.name for t in _ts(tmp_path).tools()}
+    assert AUTO_APPROVED <= names, f"名单里有不存在的工具：{AUTO_APPROVED - names}"
+
+
+def test_only_the_two_dangerous_tools_are_gated(tmp_path):
+    """新增工具默认落进确认闸（fail-closed）。
+
+    这条测试的作用是让「加了工具却没想过它危不危险」显式地红一次：
+    新工具会让这个集合变大，逼你回来做一次决定。
+    """
+    gated = {t.name for t in _ts(tmp_path).tools() if t.name not in AUTO_APPROVED}
+    assert gated == {"write_file", "run_command"}
 
 
 def test_every_tool_keeps_its_description(tmp_path):

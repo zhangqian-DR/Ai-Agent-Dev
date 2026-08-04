@@ -36,6 +36,11 @@ copy config.example.json config.json
 | `run_command`，且命令在只读白名单内（`dir` `type` `git status` `python --version` 等） | 自动放行 |
 | `run_command`，其它任何命令 | **必须确认** |
 | `write_file` | **必须确认**（先给你看 diff） |
+| 其它任何工具，**包括以后新加的** | **必须确认** |
+
+自动放行是一份**显式白名单**（`safety/commands.py` 的 `AUTO_APPROVED`），没列进去的一律要
+人工确认。反过来写（"认识的危险工具才拦"）是 fail-open：以后加一个会写盘的工具、忘了
+同步改白名单，它就静默地自动放行。两条测试盯着这份名单不跟 registry 走散。
 
 **一轮里的多个危险操作合成一张卡**，一并确认或一并拒绝（模型常常一次就发好几个
 `write_file`）。同一轮里自动放行的工具不进这张卡，照常执行。
@@ -104,7 +109,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-133 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+137 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·

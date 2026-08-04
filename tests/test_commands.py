@@ -51,6 +51,25 @@ def test_windows_switches_still_readonly():
     assert is_readonly("dir /b")
     assert is_readonly("dir /s /b")
 
+def test_unknown_tool_needs_confirmation():
+    """未知工具必须 fail-closed。
+
+    今天不可利用——registry 只有 8 个工具，别的名字会被 execute 挡下。但这是
+    一颗定时雷：以后加第 9 个会写盘的工具、忘了同步改这里，它就静默地自动放行，
+    而这道闸是提示注入的最后一层兜底。默认必须是"要确认"。
+    """
+    assert needs_confirmation("delete_everything", {})
+    assert needs_confirmation("some_future_write_tool", {"path": "x"})
+    assert needs_confirmation("", {})
+
+
+def test_auto_approved_tools_stay_auto():
+    """六个只读工具仍然自动放行，别把闸收得连查目录都要点确认。"""
+    for name in ("list_dir", "read_file", "search_in_files",
+                 "web_search", "update_plan", "save_memory"):
+        assert not needs_confirmation(name, {}), name
+
+
 def test_needs_confirmation():
     assert needs_confirmation("write_file", {"path": "a", "content": "b"})
     assert needs_confirmation("run_command", {"cmd": "del x"})
