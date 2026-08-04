@@ -121,7 +121,11 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-186 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+216 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+
+其中 30 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
+`<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着
+`pytest` 一起跑，每条检查是一个独立用例；**没装 node 就整组跳过**，不会让 pytest 变红。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·
@@ -167,6 +171,7 @@ diff，没有注册成工具，模型看不到它。
 - 单会话、单任务串行。上一个任务没跑完（**含等着你确认**）时发新目标会被拒，
   否则两个 agent 会互相覆盖文件。
 - 页面 1 秒轮询，没有流式打字机效果。
+- 页面逻辑的检查跑在最小 DOM 假件上，不是真浏览器——CSS、布局、真实事件顺序测不到。
 - checkpoint 只跨越确认闸，**不支持"关掉程序明天接着批"**：`AgentRunner` 和 `ToolSet`
   都在内存里，进程一退就没了，重启后那一轮无法恢复。要做的话得把这两样也持久化，
   并且不要在任务结束时删 checkpoint。
