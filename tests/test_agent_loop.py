@@ -89,7 +89,7 @@ def test_agent_requests_confirmation_for_write(tmp_path):
     asked = []
     _run(tmp_path, ScriptLLM(_call("write_file", {"path": "x.txt", "content": "hi"}), _done("已写入，完成")),
          confirm=lambda a: asked.append(a) or True)
-    assert asked and asked[0]["name"] == "write_file"
+    assert asked and asked[0]["actions"][0]["name"] == "write_file"
     assert (tmp_path / "x.txt").exists()
 
 
@@ -97,6 +97,61 @@ def test_confirm_rejected_skips_write(tmp_path):
     _run(tmp_path, ScriptLLM(_call("write_file", {"path": "x.txt", "content": "hi"}), _done("已取消")),
          confirm=lambda a: False)
     assert not (tmp_path / "x.txt").exists()
+
+
+def _writes(*paths):
+    return AIMessage(content="", tool_calls=[
+        {"name": "write_file", "args": {"path": p, "content": p[0].upper()}, "id": str(i)}
+        for i, p in enumerate(paths, 1)])
+
+
+def test_one_gate_for_all_dangerous_calls_in_a_turn(tmp_path):
+    """一轮里的危险操作一次问完，不逐条弹。
+
+    这不只是 UX：阶段 4b 用 interrupt 恢复时，节点会**从头重跑**，所以闸必须
+    在任何副作用之前、且一轮只有一个。逐条弹的话，恢复会把前面已经执行过的
+    工具再执行一遍。
+    """
+    asked = []
+    llm = ScriptLLM(_writes("a.txt", "b.txt"), _done())
+
+    _run(tmp_path, llm, confirm=lambda a: asked.append(a) or True)
+
+    assert len(asked) == 1, f"闸弹了 {len(asked)} 次"
+    assert [x["name"] for x in asked[0]["actions"]] == ["write_file", "write_file"]
+    assert "+A" in asked[0]["actions"][0]["preview"]
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
+
+
+def test_safe_calls_in_the_same_turn_are_not_gated(tmp_path):
+    """自动放行的工具不该混进确认卡片，但仍要照常执行。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    asked = []
+    llm = ScriptLLM(AIMessage(content="", tool_calls=[
+        {"name": "read_file", "args": {"path": "a.txt"}, "id": "1"},
+        {"name": "write_file", "args": {"path": "b.txt", "content": "B"}, "id": "2"}]),
+        _done())
+
+    _, events = _run(tmp_path, llm, confirm=lambda a: asked.append(a) or True)
+
+    assert [x["name"] for x in asked[0]["actions"]] == ["write_file"]
+    assert [e["name"] for e in events if e["type"] == "tool"] == ["read_file", "write_file"]
+
+
+def test_rejecting_the_gate_skips_only_the_gated_calls(tmp_path):
+    """拒绝只跳过过闸的那些，同一轮里自动放行的仍然执行。"""
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    llm = ScriptLLM(AIMessage(content="", tool_calls=[
+        {"name": "read_file", "args": {"path": "a.txt"}, "id": "1"},
+        {"name": "write_file", "args": {"path": "b.txt", "content": "B"}, "id": "2"}]),
+        _done("已取消"))
+
+    _, events = _run(tmp_path, llm, confirm=lambda a: False)
+
+    tools_ev = {e["name"]: e for e in events if e["type"] == "tool"}
+    assert tools_ev["read_file"]["ok"] is True
+    assert tools_ev["write_file"]["ok"] is False
+    assert not (tmp_path / "b.txt").exists()
 
 
 def test_out_of_sandbox_write_is_fed_back_not_fatal(tmp_path):
@@ -116,12 +171,18 @@ def test_out_of_sandbox_write_is_fed_back_not_fatal(tmp_path):
 
 
 def test_missing_tool_argument_is_fed_back_not_fatal(tmp_path):
-    """模型漏传 content 时是 KeyError，同样不能让整个会话陪葬。"""
+    """模型漏传必填参数时，错误要喂回去让它补，不能让整个会话陪葬。
+
+    具体是哪个异常类型不重要（工具对象化之后由 pydantic 校验抛出，不再是
+    KeyError），重要的是它变成一条工具结果、并且点明缺了什么。
+    """
     ans, events = _run(tmp_path, ScriptLLM(
         _call("write_file", {"path": "x.txt"}),
         _done("补上参数重来，完成")))
     assert "完成" in ans
-    assert any(e["type"] == "tool" and "KeyError" in e["result"] for e in events)
+    errs = [e["result"] for e in events if e["type"] == "tool" and "工具执行出错" in e["result"]]
+    assert errs, "漏参数没有作为工具结果喂回去"
+    assert "content" in errs[0], f"报错没点明缺的是哪个参数：{errs[0]!r}"
 
 
 # ---------- 缺陷一：熔断只数异常，工具返回错误字符串时不触发 ----------

@@ -97,20 +97,37 @@ def build_graph(*, llm, tools, cfg, emit, confirm):
         plan, plan_current = state["plan"], state["plan_current"]
         out: list[Any] = []
 
-        for c in parse_tool_calls(reply):
+        calls = parse_tool_calls(reply)
+        # 整盘门控：一轮里的危险操作**一次问完**，而不是逐条弹。
+        # 这不只是 UX——闸必须在任何副作用之前、且一轮只有一个：带 checkpointer
+        # 时 interrupt 恢复会让整个节点从头重跑，逐条弹的话前面已经执行过的工具
+        # 会被再执行一遍。所以先算预览、问一次，再统一执行。
+        approved = True
+        gated = [c for c in calls if needs_confirmation(c["name"], c["args"])]
+        if gated:
+            actions = []
+            for c in gated:
+                try:
+                    preview = tools.preview(c["name"], c["args"])
+                except Exception as e:
+                    # 预览生成不了不在这里定生死：照样交给 execute，
+                    # 真正的错误由它抛出来喂回模型反思
+                    preview = f"（无法生成预览：{type(e).__name__}: {e}）"
+                actions.append({"name": c["name"], "preview": preview})
+            approved = confirm({"actions": actions})
+
+        for c in calls:
             name, args = c["name"], c["args"]
-            # 确认闸和工具执行共用同一个兜底：生成确认卡片的 preview 也要过沙箱，
-            # 模型给个越界路径（SandboxError）或漏传参数（KeyError）时，这些异常
-            # 若在 try 之外会一路冒到 web 层把整个会话打死——而同样越界的
-            # read_file 只是返回一句错误让模型反思。统一喂回去，它才有机会重来。
+            # 工具异常统一兜住：模型给个越界路径（SandboxError）或漏传参数时，
+            # 这些异常若冒到 web 层会把整个会话打死——而同样越界的 read_file
+            # 只是返回一句错误让模型反思。统一喂回去，它才有机会重来。
             try:
-                if needs_confirmation(name, args):
-                    if not confirm({"name": name, "preview": tools.preview(name, args)}):
-                        result = "用户拒绝了该操作，已跳过。"
-                        # 同理：被拒绝这件事由标志说了算，不靠 result 的开头几个字
-                        emit({"type": "tool", "name": name, "result": result, "ok": False})
-                        out.append(ToolMessage(content=result, tool_call_id=c["id"]))
-                        continue
+                if not approved and needs_confirmation(name, args):
+                    result = "用户拒绝了该操作，已跳过。"
+                    # 被拒绝这件事由标志说了算，不靠 result 的开头几个字
+                    emit({"type": "tool", "name": name, "result": result, "ok": False})
+                    out.append(ToolMessage(content=result, tool_call_id=c["id"]))
+                    continue
                 result = tools.execute(name, args)
             except Exception as e:               # 工具异常→结构化喂回，触发反思
                 result = f"工具执行出错：{type(e).__name__}: {e}"

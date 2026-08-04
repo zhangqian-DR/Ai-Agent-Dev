@@ -44,9 +44,10 @@ class WriteLLM:
         return AIMessage(content="写完了")
 
 
-class TwoWritesLLM:
-    """一轮里返回两个 write_file——模型并行工具调用时的常见形状。
-    两次确认之间只隔一次写盘，比页面 1 秒的轮询周期短得多。"""
+class TwoTurnWritesLLM:
+    """相邻两轮各写一个文件——同一轮里的危险操作已经被整盘门控合成一次确认，
+    所以「连续两次确认」现在来自连续两轮。两次之间只隔一次写盘 + 一次模型调用，
+    仍然可能比页面 1 秒的轮询周期短。"""
 
     def __init__(self):
         self.n = 0
@@ -54,8 +55,9 @@ class TwoWritesLLM:
     def chat(self, m, t):
         self.n += 1
         if self.n == 1:
-            return _ai(("1", "write_file", {"path": "a.txt", "content": "A"}),
-                       ("2", "write_file", {"path": "b.txt", "content": "B"}))
+            return _ai(("1", "write_file", {"path": "a.txt", "content": "A"}))
+        if self.n == 2:
+            return _ai(("2", "write_file", {"path": "b.txt", "content": "B"}))
         return AIMessage(content="写完了")
 
 
@@ -134,8 +136,8 @@ def test_confirmation_round_trip(tmp_path):
     client = TestClient(_app(tmp_path, WriteLLM()))
     client.post("/send", json={"goal": "写文件"})
     _, data = _drain(client)
-    assert data["pending"] and data["pending"]["name"] == "write_file"
-    assert "+hi" in data["pending"]["preview"]        # 确认卡片带 diff
+    assert data["pending"] and data["pending"]["actions"][0]["name"] == "write_file"
+    assert "+hi" in data["pending"]["actions"][0]["preview"]   # 确认卡片带 diff
 
     assert client.post("/approve", json={"ok": True}).status_code == 200
     events, _ = _drain(client)
@@ -159,11 +161,11 @@ def test_consecutive_confirmations_get_distinct_ids(tmp_path):
     一张卡"，而两次确认之间 pending 变空的窗口比轮询周期短——页面看不到那个空窗，
     就会把第二次确认当成第一次的重复丢掉，agent 线程从此永久卡在等确认上。
     """
-    client = TestClient(_app(tmp_path, TwoWritesLLM()))
+    client = TestClient(_app(tmp_path, TwoTurnWritesLLM()))
     client.post("/send", json={"goal": "写两个文件"})
 
     first = _wait_pending(client)
-    assert first is not None and first["name"] == "write_file"
+    assert first is not None and first["actions"][0]["name"] == "write_file"
     assert client.post("/approve", json={"ok": True}).status_code == 200
 
     second = _wait_pending(client, after=first["id"])

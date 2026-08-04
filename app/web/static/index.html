@@ -72,6 +72,7 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);fon
   white-space:pre;overflow-x:auto;max-height:240px;overflow-y:auto;background:var(--surface);
   border-bottom:1px solid var(--accent-line)}
 .d-add{color:var(--ok)}.d-del{color:var(--danger)}.d-meta{color:var(--text-faint)}
+.gate-item{padding:8px 13px 0;font-family:var(--mono);font-size:11.5px;color:var(--accent)}
 .gate-actions{display:flex;gap:9px;padding:11px 13px;flex-wrap:wrap;align-items:center}
 .gate-hint{font-size:12px;color:var(--text-dim);margin-left:auto}
 
@@ -209,23 +210,37 @@ function diffPre(text){
   return pre;
 }
 
-// 按 id 判重，不是按"当前有没有画着一张卡"。模型一轮里连发两个 write_file 时，
+// 按 id 判重，不是按"当前有没有画着一张卡"。相邻两轮各有一个危险操作时，
 // 两次确认之间 pending 变空的窗口比 1 秒的轮询周期短得多，看"有没有卡"的话
 // 第二张永远画不出来，页面停在一张已禁用的旧卡上，agent 也就永久卡住了。
+//
+// 一张卡对应**一轮里的全部危险操作**（整盘门控），确认/拒绝一次作用于整批。
 function showGate(p){
   if(gateId===p.id)return;
   gateId=p.id;
+  var acts=p.actions||[];
+  var writes=acts.filter(function(a){return a.name==='write_file';}).length;
+  var many=acts.length>1;
+
   var card=el('div','gate'),head=el('div','gate-head');
-  var isWrite=p.name==='write_file';
-  head.appendChild(el('span','gate-title',isWrite?'写入文件':'执行命令'));
-  head.appendChild(el('span','gate-why',p.name+(isWrite?' · 一律需确认':' · 不在只读白名单')));
+  head.appendChild(el('span','gate-title',
+    many?acts.length+' 个操作待确认':(writes?'写入文件':'执行命令')));
+  head.appendChild(el('span','gate-why',
+    many?'一并确认或一并拒绝':(writes?'write_file · 一律需确认':'run_command · 不在只读白名单')));
   card.appendChild(head);
-  card.appendChild(diffPre(p.preview||'(无预览)'));
+  acts.forEach(function(a,i){
+    if(many)card.appendChild(el('div','gate-item',(i+1)+'. '+a.name));
+    card.appendChild(diffPre(a.preview||'(无预览)'));
+  });
 
   var actions=el('div','gate-actions');
-  var ok=el('button','btn-ok','确认执行'),no=el('button',null,'拒绝');
+  var ok=el('button','btn-ok',many?'全部确认':'确认执行'),
+      no=el('button',null,many?'全部拒绝':'拒绝');
   actions.appendChild(ok);actions.appendChild(no);
-  actions.appendChild(el('span','gate-hint',isWrite?'确认后才会落盘；覆盖前自动逐代备份':'工作目录锁死在沙箱内，30 秒超时强制终止'));
+  actions.appendChild(el('span','gate-hint',
+    writes===acts.length?'确认后才会落盘；覆盖前自动逐代备份'
+    :writes===0?'工作目录锁死在沙箱内，30 秒超时强制终止'
+    :'确认后按顺序执行；写入前自动逐代备份'));
   card.appendChild(actions);
   add(row('⏸',card));
   setStatus('wait','等待你确认');
