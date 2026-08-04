@@ -143,9 +143,9 @@ direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-256 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+258 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
-其中 30 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
+其中 32 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着
 `pytest` 一起跑，每条检查是一个独立用例；**没装 node 就整组跳过**，不会让 pytest 变红。
 
