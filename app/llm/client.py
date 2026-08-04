@@ -17,7 +17,7 @@ def parse_tool_calls(msg: AIMessage) -> list[dict]:
     """
     calls = [{"id": tc.get("id") or "", "name": tc.get("name") or "",
               "args": tc.get("args") or {}}
-             for tc in (msg.tool_calls or [])]
+             for tc in (getattr(msg, "tool_calls", None) or [])]
     calls += [{"id": tc.get("id") or "", "name": tc.get("name") or "", "args": {}}
               for tc in (getattr(msg, "invalid_tool_calls", None) or [])]
     return calls

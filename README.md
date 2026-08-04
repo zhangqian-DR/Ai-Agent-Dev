@@ -97,11 +97,17 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-120 个测试，不联网、不需要 api_key（模型层用 monkeypatch，agent 循环用脚本化的 FakeLLM）。
+128 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
-`app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 循环与上下文裁剪 ·
+`app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·
 `app/web/` FastAPI 与静态页。各层接口明确，可独立测试。
+
+ReAct 循环由 **LangGraph 的 `StateGraph`** 驱动（`agent ⇄ tools` 一个环），模型层走
+`langchain-openai` 的 `ChatOpenAI`。工具是 LangChain 工具对象，模型看到的函数定义由
+pydantic 参数模型自动生成。**没有用预制的 `ToolNode`**——工具执行要过确认闸、走熔断、
+按类型发不同事件，包一层比自己写更长。`max_steps` 仍然是「最多几轮模型调用」，
+换算成 `recursion_limit` 时要乘 2（它数的是节点执行次数，一个回合两个节点）。
 
 八个工具：`list_dir` `read_file` `search_in_files` `web_search` `update_plan` `save_memory`
 （自动放行）、`write_file` `run_command`（过安全阀）。`fs.preview_write` 只给确认卡片生成
@@ -109,7 +115,11 @@ diff，没有注册成工具，模型看不到它。
 
 **流程图**：[`docs/流程图.html`](docs/流程图.html) —— 分层依赖、任务时序（确认闸的线程阻塞）、
 `run_agent` 单步控制流、安全阀判定树。用浏览器打开，图表需要联网加载一次 mermaid；
-加载不出来时会原样显示图表源码。改代码后记得同步。
+加载不出来时会原样显示图表源码。
+
+> ⚠️ **这张图还没跟上代码**：它画的是手写 for 循环的控制流，现在已经换成
+> LangGraph 的 StateGraph 了。分层依赖和安全阀判定树仍然准确，任务时序与
+> `run_agent` 那两张待重画。
 
 ## 已知限制
 

@@ -48,7 +48,12 @@ def _run(tmp_path, llm, confirm=lambda a: True, tools=None):
 
 
 class ScriptLLM:
-    """按脚本依次返回；脚本用完后一直返回最后一条。记录每次收到的 messages。"""
+    """按脚本依次返回；脚本用完后一直返回最后一条。记录每次收到的 messages。
+
+    每次返回**一份新的拷贝**：真实模型每次都给新消息，而 add_messages 是按 id
+    合并的——同一个对象返回两次，第二次会被当成「替换第一次」而不是追加，
+    历史直接被搅乱。脚本重复播放最后一条时必然踩到。
+    """
 
     def __init__(self, *script):
         self.script = list(script)
@@ -59,7 +64,7 @@ class ScriptLLM:
         self.seen.append(copy.deepcopy(messages))
         item = self.script[min(self.n, len(self.script) - 1)]
         self.n += 1
-        return item
+        return copy.deepcopy(item)
 
 
 def _call(name, args, cid="1", content=""):
@@ -183,6 +188,30 @@ def test_breaker_trips_when_only_the_output_varies(tmp_path):
 
     assert "已达最大步数" not in ans, "熔断没生效，一路跑到了步数上限"
     assert tools.calls < 8, f"命令被跑了 {tools.calls} 次，熔断来得太晚"
+
+
+def test_max_steps_gives_a_clean_ending(tmp_path):
+    """步数用尽要有个明确的收场。换成图之后这条路是捕获 GraphRecursionError，
+    漏捕的话异常会一路冒到 web 层，变成一条「出错：」把会话打死。
+
+    每次换不同的参数，免得先被熔断拦下——这里要测的是步数上限本身。
+    """
+    class Endless:
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, tools):
+            self.n += 1
+            return AIMessage(content="", tool_calls=[
+                {"name": "read_file", "args": {"path": f"no{self.n}.txt"},
+                 "id": str(self.n)}])
+
+    ans, events = _run(tmp_path, Endless())
+
+    assert ans == "已达最大步数，停止。"
+    assert events[-1]["type"] == "final" and events[-1]["ok"] is True
+    assert len([e for e in events if e["type"] == "step"]) == 20, \
+        "max_steps 仍应表示「最多几轮模型调用」"
 
 
 def test_different_results_do_not_trip_breaker(tmp_path):
