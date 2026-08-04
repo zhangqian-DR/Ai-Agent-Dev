@@ -1,6 +1,8 @@
 import copy
 import json
 
+from langchain_core.messages import AIMessage, ToolMessage, convert_to_openai_messages
+
 from app.agent.loop import run_agent
 from app.config import Config
 from app.store.db import Store
@@ -60,12 +62,13 @@ class ScriptLLM:
         return item
 
 
-def _call(name, args, cid="1"):
-    return {"content": None, "tool_calls": [{"id": cid, "name": name, "args": args}]}
+def _call(name, args, cid="1", content=""):
+    return AIMessage(content=content,
+                     tool_calls=[{"name": name, "args": args, "id": cid}])
 
 
 def _done(text="完成"):
-    return {"content": text, "tool_calls": []}
+    return AIMessage(content=text)
 
 
 # ---------- 原有行为不能破坏 ----------
@@ -137,7 +140,7 @@ def test_circuit_breaker_nudges_before_terminating(tmp_path):
 
     _run(tmp_path, llm)
 
-    tool_msgs = [m["content"] for msgs in llm.seen for m in msgs if m.get("role") == "tool"]
+    tool_msgs = [m.content for msgs in llm.seen for m in msgs if isinstance(m, ToolMessage)]
     assert any("重复" in t or "已经" in t for t in tool_msgs), \
         f"第二次重复时没有给模型任何提示：{tool_msgs}"
 
@@ -202,8 +205,7 @@ def test_final_answer_is_not_emitted_twice(tmp_path):
 def test_thinking_text_still_emitted_when_calling_tools(tmp_path):
     """但有工具调用时，那段思考文字仍然要显示——它不是最终回答。"""
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
-    llm = ScriptLLM({"content": "我先读文件", "tool_calls":
-                     [{"id": "1", "name": "read_file", "args": {"path": "a.txt"}}]}, _done())
+    llm = ScriptLLM(_call("read_file", {"path": "a.txt"}, content="我先读文件"), _done())
     _, events = _run(tmp_path, llm)
     assert any(e["type"] == "assistant" and e["content"] == "我先读文件" for e in events)
 
@@ -235,17 +237,28 @@ def test_step_events_report_progress_and_context(tmp_path):
 # ---------- 缺陷二：执行完的超大 arguments 一直占着历史 ----------
 
 def test_large_tool_arguments_shrunk_after_execution(tmp_path):
-    """write_file 的文件内容在 tool_calls.arguments 里，是整段历史最大的负载。
-    执行完之后模型不需要再看一遍，留着只会挤掉真正有用的上下文。"""
+    """write_file 的文件内容在 tool_calls 的参数里，是整段历史最大的负载。
+    执行完之后模型不需要再看一遍，留着只会挤掉真正有用的上下文。
+
+    断言落在**真正发出去的 wire 形态**上而不是内存里的 dict：真实模型回复会在
+    additional_kwargs 里另存一份原始 JSON，只压 tool_calls 的话那份还在，
+    压缩完全白做——这条只有按 wire 量才测得出来。
+    """
     big = "x" * 50_000
-    llm = ScriptLLM(_call("write_file", {"path": "a.txt", "content": big}), _done())
+    reply = _call("write_file", {"path": "a.txt", "content": big})
+    # 补上真实回复才有的那份原始副本，假件默认不带
+    reply.additional_kwargs = {"tool_calls": [
+        {"id": "1", "type": "function",
+         "function": {"name": "write_file",
+                      "arguments": json.dumps({"path": "a.txt", "content": big})}}]}
+    llm = ScriptLLM(reply, _done())
 
     _run(tmp_path, llm)
 
     second = llm.seen[1]          # 第二次请求带的历史
-    asst = [m for m in second if m.get("role") == "assistant" and m.get("tool_calls")]
+    asst = [m for m in second if isinstance(m, AIMessage) and m.tool_calls]
     assert asst, "历史里应有带 tool_calls 的 assistant 消息"
-    raw = asst[0]["tool_calls"][0]["function"]["arguments"]
-    assert len(raw) < 2000, f"执行完的 arguments 仍有 {len(raw)} 字符"
-    assert "a.txt" in raw, "路径这种短字段要留着，模型还需要知道自己改了哪个文件"
-    json.loads(raw)               # 必须仍是合法 JSON，否则协议校验会失败
+
+    wire = json.dumps(convert_to_openai_messages(asst), ensure_ascii=False)
+    assert len(wire) < 2000, f"执行完的参数仍占 {len(wire)} 字符"
+    assert "a.txt" in wire, "路径这种短字段要留着，模型还需要知道自己改了哪个文件"

@@ -4,6 +4,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
 
 from app.config import Config
 from app.store.db import Store
@@ -16,6 +17,11 @@ class FakeProvider(SearchProvider):
         return []
 
 
+def _ai(*calls, content=""):
+    return AIMessage(content=content, tool_calls=[
+        {"name": n, "args": a, "id": i} for i, n, a in calls])
+
+
 class ListDirLLM:
     def __init__(self):
         self.n = 0
@@ -23,8 +29,8 @@ class ListDirLLM:
     def chat(self, m, t):
         self.n += 1
         if self.n == 1:
-            return {"content": None, "tool_calls": [{"id": "1", "name": "list_dir", "args": {"path": "."}}]}
-        return {"content": "完成了", "tool_calls": []}
+            return _ai(("1", "list_dir", {"path": "."}))
+        return AIMessage(content="完成了")
 
 
 class WriteLLM:
@@ -34,9 +40,8 @@ class WriteLLM:
     def chat(self, m, t):
         self.n += 1
         if self.n == 1:
-            return {"content": None, "tool_calls":
-                    [{"id": "1", "name": "write_file", "args": {"path": "x.txt", "content": "hi"}}]}
-        return {"content": "写完了", "tool_calls": []}
+            return _ai(("1", "write_file", {"path": "x.txt", "content": "hi"}))
+        return AIMessage(content="写完了")
 
 
 class TwoWritesLLM:
@@ -49,10 +54,9 @@ class TwoWritesLLM:
     def chat(self, m, t):
         self.n += 1
         if self.n == 1:
-            return {"content": None, "tool_calls": [
-                {"id": "1", "name": "write_file", "args": {"path": "a.txt", "content": "A"}},
-                {"id": "2", "name": "write_file", "args": {"path": "b.txt", "content": "B"}}]}
-        return {"content": "写完了", "tool_calls": []}
+            return _ai(("1", "write_file", {"path": "a.txt", "content": "A"}),
+                       ("2", "write_file", {"path": "b.txt", "content": "B"}))
+        return AIMessage(content="写完了")
 
 
 class BoomLLM:
@@ -311,9 +315,9 @@ class PlanLLM:
     def chat(self, m, t):
         self.n += 1
         if self.n <= 2:
-            return {"content": None, "tool_calls": [{"id": str(self.n), "name": "update_plan",
-                    "args": {"steps": ["一", "二", "三"], "current": self.n * 2 - 1}}]}
-        return {"content": "做完了", "tool_calls": []}
+            return _ai((str(self.n), "update_plan",
+                        {"steps": ["一", "二", "三"], "current": self.n * 2 - 1}))
+        return AIMessage(content="做完了")
 
 
 def test_poll_exposes_plan_progress(tmp_path):
