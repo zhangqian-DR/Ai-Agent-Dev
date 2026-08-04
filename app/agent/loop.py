@@ -61,7 +61,7 @@ def run_agent(goal, *, llm, tools, cfg, emit, confirm, memories) -> str:
     for step in range(1, cfg.max_steps + 1):
         messages = trim_history(messages)
         emit({"type": "step", "n": step, "max": cfg.max_steps, "chars": history_size(messages)})
-        resp = llm.chat(messages, tools.schemas())
+        resp = llm.chat(messages, tools.tools())
         content, calls = resp["content"], resp["tool_calls"]
         # 没有 tool_calls 时这段 content 就是最终回答，只以 final 发一次。
         # 两个都发的话页面上同一段话会显示两遍，数据库里也会存两条。

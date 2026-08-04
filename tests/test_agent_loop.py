@@ -25,7 +25,7 @@ class VaryingOutputTools:
         self.calls = 0
         self.plan, self.plan_current = [], 0
 
-    def schemas(self):
+    def tools(self):
         return []
 
     def preview(self, name, args):
