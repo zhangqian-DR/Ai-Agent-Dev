@@ -97,7 +97,7 @@ copy config.example.json config.json
 | 值 | 需要额外 key | 有 URL | 说明 |
 |---|---|---|---|
 | `dashscope` | 否，复用 `api_key` | **否** | 用千问自带的联网搜索。结果是真实抓取的，但兼容模式不返回结构化来源，只有标题和摘要 |
-| `duckduckgo` | 否 | 是 | 免 key 且有链接，但对网络出口敏感——被风控时所有 backend 都返回 `202 Ratelimit`，换 UA、换版本、等一等都没用 |
+| `duckduckgo` | 否 | **是** | 免 key 且**有链接**，走 `ddgs`（它自己聚合多个搜索源）。旧的 `duckduckgo-search` 对网络出口很敏感、一搜就 `202 Ratelimit`，换成 `ddgs` 后实测连搜 3 次都正常返回 |
 
 搜索源挂掉时 `web_search` 不会抛异常，而是返回一句明确的"不可用、不要重试"给模型，
 避免它换着措辞反复试同一个坏工具。要接 Tavily / 博查之类，实现一个 `SearchProvider`
@@ -175,8 +175,8 @@ diff，没有注册成工具，模型看不到它。
 - 程序运行期间 `agent.db` 会被 sqlite 占用（删不掉也移不走），正常退出时释放。
   连接跨线程共享，所有读写都过同一把锁——没有锁的话退出时关连接会撞上 agent
   线程正在写，直接访问违规而不是抛异常。
-- `duckduckgo-search` 还锁在 5.3.1。当初锁它是因为 6.x 的 Rust 扩展没有 py38 wheel，
-  现在跑在 3.12 上，这个理由已经不成立，可以升，只是还没升。
+- 默认的 `dashscope` 搜索**拿不到 URL**（兼容模式不返回结构化来源）。要链接就把
+  `search_provider` 换成 `duckduckgo`。
 
 ## Phase 2
 

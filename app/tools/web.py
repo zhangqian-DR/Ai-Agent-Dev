@@ -8,10 +8,15 @@ class SearchProvider(ABC):
         ...
 
 class DuckDuckGoProvider(SearchProvider):
-    """免 key，但对网络出口敏感：被风控时所有 backend 都返回 202 Ratelimit。"""
+    """免 key，而且**带 URL**——dashscope 那条路拿不到链接。
+
+    走 ``ddgs``（原 ``duckduckgo-search`` 改名后的包，它自己会聚合多个搜索源）。
+    旧的 duckduckgo-search 对网络出口很敏感，从这台机器上一搜就 Ratelimit；
+    换成 ddgs 之后实测能正常返回。返回字段仍是 title / href / body。
+    """
 
     def search(self, query: str, max_results: int = 5) -> list[dict]:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             return list(ddgs.text(query, max_results=max_results))
 
