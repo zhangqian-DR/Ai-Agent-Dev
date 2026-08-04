@@ -5,7 +5,12 @@ __pycache__/
 .venv/
 venv/
 agent.db
+agent.db-shm
+agent.db-wal
+# sqlite 在 WAL 模式下会另建 -shm / -wal 两个边车文件，得一起忽略
 *.checkpoints.sqlite
+*.checkpoints.sqlite-shm
+*.checkpoints.sqlite-wal
 config.json
 workspace/
 *.bak
