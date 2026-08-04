@@ -70,6 +70,9 @@ copy config.example.json config.json
   **禁令单独打标**，提示词里是 `【用户明确禁止】…`，面板上标红。
   「要用 tab」和「不要用 tab」结构一样的话，那个「不」字全靠模型自己读到，读漏一次
   就会做出正好相反的事。
+  **记错了能删**：面板上每条记忆 hover 出 `×`，点一下变「删除？」再确认才真删
+  （硬删、没有撤销，所以做成两步）。agent 没有删除工具，这是唯一的删除入口——
+  没有它，模型记错一次就永久错下去。
 - `agent.checkpoints.sqlite` —— LangGraph 的 checkpoint，跟着 `db_path` 走、和 `agent.db`
   分开放（两者的锁和生命周期各归各管）。它只用来跨越确认闸，**任务一结束就删掉那一轮**，
   所以不会无界增长。
@@ -117,7 +120,7 @@ copy config.example.json config.json
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-149 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+155 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 分层：`app/config.py` 配置 · `app/safety/` 沙箱与白名单 · `app/tools/` 八个工具与注册表 ·
 `app/store/` SQLite · `app/llm/` 模型客户端 · `app/agent/` ReAct 图与上下文裁剪 ·

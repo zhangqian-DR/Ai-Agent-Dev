@@ -121,6 +121,39 @@ def test_memory_injection_is_capped(tmp_path):
     assert len(s.get_memories()) == 60, "库里一条都不该少"
 
 
+def test_memories_carry_an_id(tmp_path):
+    """要能删就得能指名道姓，光有文本不行——同一句话可能记过又删过。"""
+    s = Store(str(tmp_path / "m5.db"))
+    s.add_memory("用户用 Java")
+    assert isinstance(s.get_memories()[0]["id"], int)
+
+
+def test_delete_memory(tmp_path):
+    s = Store(str(tmp_path / "m6.db"))
+    s.add_memory("记错的一条")
+    s.add_memory("对的一条")
+    wrong = s.get_memories()[0]["id"]
+
+    assert s.delete_memory(wrong) is True
+    assert [m["fact"] for m in s.get_memories()] == ["对的一条"]
+
+
+def test_delete_unknown_memory_returns_false(tmp_path):
+    s = Store(str(tmp_path / "m7.db"))
+    assert s.delete_memory(9999) is False
+
+
+def test_deleted_memory_can_be_added_again(tmp_path):
+    """这才是真正的用户故事：记错了 → 删掉 → 重新记对的。
+    去重不能把「删过之后再记」也一并挡住。"""
+    s = Store(str(tmp_path / "m8.db"))
+    s.add_memory("用户用 Python")
+    s.delete_memory(s.get_memories()[0]["id"])
+
+    assert s.add_memory("用户用 Python") is True
+    assert len(s.get_memories()) == 1
+
+
 def test_memory_columns_added_to_an_old_db(tmp_path):
     """老库的 memory 表只有 id/fact/created_at，得补列且不碰已有记录。"""
     db = tmp_path / "old_mem.db"

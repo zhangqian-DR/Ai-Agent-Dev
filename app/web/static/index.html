@@ -91,8 +91,15 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .plan li.done .label{text-decoration:line-through;text-decoration-color:var(--text-faint)}
 .plan li.active{color:var(--text);font-weight:500}.plan li.active .mark{color:var(--accent)}
 .mem{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
-.mem li{font-size:12.5px;color:var(--text-dim);line-height:1.45;padding-left:11px;border-left:2px solid var(--line)}
+.mem li{font-size:12.5px;color:var(--text-dim);line-height:1.45;padding-left:11px;
+  border-left:2px solid var(--line);display:flex;align-items:baseline;gap:6px}
 .mem li.neg{border-left-color:var(--danger);color:var(--danger)}
+.mem-text{min-width:0;flex:1;word-break:break-word}
+.mem-x{flex:none;font:inherit;font-size:11px;line-height:1;padding:2px 5px;border-radius:4px;
+  border:1px solid transparent;background:transparent;color:var(--text-faint);cursor:pointer;opacity:0}
+.mem li:hover .mem-x,.mem-x:focus-visible,.mem-x.armed{opacity:1}
+.mem-x:hover{color:var(--danger);border-color:var(--line)}
+.mem-x.armed{color:var(--danger);border-color:var(--danger);background:var(--danger-soft)}
 .meter-row{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);
   font-size:11.5px;color:var(--text-dim);font-variant-numeric:tabular-nums;margin-bottom:5px}
 .meter-row b{color:var(--text);font-weight:500}
@@ -377,14 +384,41 @@ function scheduleNext(){setTimeout(poll,1000);}
 
 // 禁令单独标出来。「要用 tab」和「不要用 tab」长得一样的话，
 // 面板上根本看不出哪条是禁令——提示词里也是同一个道理。
-fetch('/memories').then(function(r){return r.json();}).then(function(d){
-  var list=d.memories||[];memEl.innerHTML='';
+//
+// 删除是两步的：先点 ×，那一条变成「删除？」再确认。这是唯一的删除入口
+// （agent 没有删除工具），而且是硬删没有撤销，所以不能一点就没。
+function renderMemories(list){
+  memEl.innerHTML='';
   if(!list.length){memEl.appendChild(el('li',null,'（暂无）'));return;}
   list.forEach(function(m){
     var neg=!!m.is_negative;
-    memEl.appendChild(el('li',neg?'neg':null,(neg?'禁止 · ':'')+(m.fact||'')));
+    var li=el('li',neg?'neg':null);
+    var label=el('span','mem-text',(neg?'禁止 · ':'')+(m.fact||''));
+    var x=el('button','mem-x','×');
+    x.title='删掉这条记忆';
+    li.appendChild(label);li.appendChild(x);
+
+    x.addEventListener('click',function(){
+      if(x.dataset.armed){                 // 第二次点：真删
+        fetch('/memories/'+m.id,{method:'DELETE'})
+          .then(function(r){if(r.ok)loadMemories();else say('删除失败');})
+          .catch(function(){say('删除没送出去，检查服务是否还活着');});
+        return;
+      }
+      x.dataset.armed='1';x.textContent='删除？';x.className='mem-x armed';
+      setTimeout(function(){                // 5 秒没确认就复位，别一直挂着
+        if(x.dataset.armed){delete x.dataset.armed;x.textContent='×';x.className='mem-x';}
+      },5000);
+    });
+    memEl.appendChild(li);
   });
-}).catch(function(){});
+}
+
+function loadMemories(){
+  return fetch('/memories').then(function(r){return r.json();})
+    .then(function(d){renderMemories(d.memories||[]);}).catch(function(){});
+}
+loadMemories();
 
 sendBtn.addEventListener('click',send);
 goal.addEventListener('keydown',function(e){if(e.key==='Enter')send();});

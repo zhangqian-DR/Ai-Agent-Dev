@@ -239,6 +239,33 @@ def test_memories_endpoint_exposes_polarity(tmp_path):
     assert [m["is_negative"] for m in got] == [False, True]
 
 
+def _mem_client(tmp_path):
+    db = _db(tmp_path)
+    store = Store(str(db))
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    app = create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider())
+    return TestClient(app), store
+
+
+def test_delete_memory_endpoint(tmp_path):
+    """记错一条得能删掉。没有这个入口的话，模型记错一次就永久错下去——
+    页面只读，agent 也没有删除工具。"""
+    client, store = _mem_client(tmp_path)
+    store.add_memory("记错的一条")
+    store.add_memory("对的一条")
+    wrong = client.get("/memories").json()["memories"][0]["id"]
+
+    assert client.delete(f"/memories/{wrong}").status_code == 200
+
+    left = [m["fact"] for m in client.get("/memories").json()["memories"]]
+    assert left == ["对的一条"]
+
+
+def test_delete_unknown_memory_is_404(tmp_path):
+    client, _ = _mem_client(tmp_path)
+    assert client.delete("/memories/9999").status_code == 404
+
+
 def test_shutdown_closes_the_store(tmp_path):
     """程序退出后不该还占着 agent.db。"""
     db = _db(tmp_path)

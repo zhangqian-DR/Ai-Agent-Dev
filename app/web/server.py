@@ -217,7 +217,19 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
 
     @app.get("/memories")
     def memories():
+        # 面板显示全部；注入提示词的那份另有上限，见 /send
         return {"memories": store.get_memories()}
+
+    @app.delete("/memories/{memory_id}")
+    def forget(memory_id: int):
+        """删掉一条记忆。
+
+        agent 没有删除工具，这是**唯一**的删除入口——没有它，模型记错一次就
+        永久错下去，用户只能去改库。
+        """
+        if not store.delete_memory(memory_id):
+            return JSONResponse({"ok": False, "error": "没有这条记忆"}, status_code=404)
+        return {"ok": True}
 
     @app.get("/")
     def index():

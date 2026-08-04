@@ -137,7 +137,21 @@ class Store:
             if self._closed:
                 return []
             rows = self.conn.execute(
-                "SELECT fact, is_negative FROM memory ORDER BY id").fetchall()
+                "SELECT id, fact, is_negative FROM memory ORDER BY id").fetchall()
             if limit and len(rows) > limit:
                 rows = rows[-limit:]
-            return [{"fact": r["fact"], "is_negative": bool(r["is_negative"])} for r in rows]
+            return [{"id": r["id"], "fact": r["fact"],
+                     "is_negative": bool(r["is_negative"])} for r in rows]
+
+    def delete_memory(self, memory_id: int) -> bool:
+        """删掉一条记忆，不存在返回 False。
+
+        是**硬删**，不是软删：这个动作只由用户显式触发（agent 没有删除工具），
+        用户说删就是真想删掉。记错一条之后能删、能重记，是这条路径的全部意义。
+        """
+        with self._lock:
+            if self._closed:
+                return False
+            cur = self.conn.execute("DELETE FROM memory WHERE id=?", (memory_id,))
+            self.conn.commit()
+            return cur.rowcount > 0
