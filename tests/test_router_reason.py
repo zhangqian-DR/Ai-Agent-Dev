@@ -74,6 +74,32 @@ def test_garbage_from_the_classifier_keeps_the_keyword_result():
     assert out.path == d.path and out.reason == FALLBACK
 
 
+def test_classifier_cannot_route_a_lookup_into_direct():
+    """真机撞见的：「上网查查 qwen3 的定价」被分类器判成 direct，于是模型答
+    「我不能联网查询信息」——它确实不能，direct 路一个工具都没绑。查资料不碰文件
+    但要用 web_search，提示词已经写清楚了，这里再挡一道：判进 direct 是最贵的错。"""
+    goal = "上网查查 qwen3 的定价"
+    d = decide(goal)
+    assert d.reason == FALLBACK                      # 关键词没管这条，走到分类器
+
+    out = refine(goal, d, _Fake("direct"))
+
+    assert out.path == "fast", "查资料的活儿绝不能进 direct"
+    assert out.reason == "llm_vetoed", "驳回了也要留痕，否则没人知道提示词退化了"
+
+
+def test_veto_only_blocks_direct():
+    """驳回的是 direct 这一个去向，分类器说 slow 照样采纳——它挡的是错误方向，
+    不是把整个分类器废掉。"""
+    goal = "查查这堆代码是怎么串起来的"
+    d = decide(goal)
+    assert d.reason == FALLBACK                      # 确实走到了分类器
+
+    out = refine(goal, d, _Fake("slow"))
+
+    assert out.path == "slow" and out.reason == "llm"
+
+
 def test_classifier_failure_never_breaks_the_task():
     """分类只是锦上添花。它挂了要退回关键词的结论，不能让整轮任务陪葬。"""
     class Boom:

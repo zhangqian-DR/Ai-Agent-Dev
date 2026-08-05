@@ -106,6 +106,11 @@ copy config.example.json config.json
 判错的代价**不对称**，所以规则往上偏：把闲聊判成 fast 只是多花点 token，把真任务判成
 direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很窄，认不出来的一律走 `fast`。
 
+`direct` 的判据是**不需要任何工具**，不是「不碰文件」——查资料同样不碰文件，但要用
+`web_search`。这两者混淆过一次：「搜一下 X 怎么用」被判进 direct，模型于是回答「我不能
+联网查询信息」，而它确实不能，那是路由的错。所以带查询意图的说法（搜/查/上网/资料/最新…）
+**一律不得进 `direct`**，关键词层和兜底分类器各挡一道。
+
 规则不只看关键词，还看**范围**——「恰好点名一个文件」是具体活儿，「所有 / 整个项目」
 或点了两个文件就是跨文件的活。关键词表是先写标注语料、再设计规则定出来的，那份语料
 就是 `tests/test_router.py`。
@@ -122,8 +127,9 @@ direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很
 把准确率补回来，不是在替它兜底兜安全。分类失败（网络抖动等）就保留关键词的结果，
 绝不因此打断任务。整个兜底层可以用 `route_fallback: false` 关掉。
 
-每一轮走了哪条路、依据是哪条规则（`chitchat` / `analyze_wide` / `wide` / `llm` / `fallback`…）
-都落在 `sessions` 表里，`/poll` 也一并返回。判错了得有痕迹，否则用户只会觉得"它今天有点笨"。
+每一轮走了哪条路、依据是哪条规则（`chitchat` / `analyze_wide` / `wide` / `llm` /
+`llm_vetoed` / `fallback`…）都落在 `sessions` 表里，`/poll` 也一并返回。判错了得有痕迹，
+否则用户只会觉得"它今天有点笨"。
 
 `direct` 是**真的不绑工具**——不是换个模型而已。没绑工具，模型就算想调 `write_file`
 也调不出来，"回答问题"和"能动手"是物理隔开的。它的系统提示词也另写了一份短的：
@@ -192,7 +198,7 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-294 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+301 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 其中 32 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着

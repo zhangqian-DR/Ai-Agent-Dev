@@ -32,8 +32,19 @@ FAST = "fast"
 SLOW = "slow"
 
 # 元问题与闲聊。只放**明确**指向 agent 自身的说法，宁窄勿宽。
-_CHITCHAT = ("你好", "你是谁", "在吗", "谢谢", "能做什么", "有什么功能",
-             "怎么用", "如何使用", "使用说明", "帮助", "介绍一下你")
+_CHITCHAT = ("你好", "你是谁", "在吗", "谢谢", "能做什么", "有什么功能", "介绍一下你")
+
+# 这几个只有在句子里**没有别的主语**时才是在问 agent 自己——「怎么用」是问它，
+# 「LangGraph 的 checkpointer 怎么用」是问第三方。句子一长就必然带了别的主语，
+# 所以只在短句上认。真机撞见过后者被判成 direct。
+_CHITCHAT_SHORT = ("怎么用", "如何使用", "使用说明", "帮助")
+_SHORT = 10
+
+# 要去外面找信息的说法。这类请求**不碰文件，但要用 web_search**——direct 路一个
+# 工具都没绑，判进去模型只能答「我不能联网查询信息」。它确实不能，那是路由的错。
+# 这张表只用来**否决 direct**，判宽了最多让闲聊多花点 token，方向是安全的。
+_LOOKUP = ("搜一下", "搜下", "搜搜", "搜索", "查一下", "查下", "查查", "查询",
+           "上网", "百度", "谷歌", "google", "资料", "最新", "官网", "网上")
 
 # 动作：这类词说明用户要的是"想清楚"而不是"动手改"
 _ANALYZE = ("分析", "梳理", "对比", "审计", "评估", "综述", "调研",
@@ -50,6 +61,7 @@ _FILEISH = re.compile(r"[\w\-/\\]+\.[A-Za-z]{1,4}\b")
 # 换嵌入路由也好、加分类器也好，都还是拍脑袋。
 FALLBACK = "fallback"          # 什么都没命中，退回 fast
 _BY_LLM = "llm"                # 兜底分类器判的
+_VETOED = "llm_vetoed"         # 分类器说 direct，但这是要查资料的活儿，驳回
 
 
 class Decision(NamedTuple):
@@ -57,10 +69,21 @@ class Decision(NamedTuple):
     reason: str
 
 
+def needs_lookup(goal: str) -> bool:
+    """要去外面找信息吗？是的话就**不能**走 direct——那条路没有 web_search。"""
+    low = (goal or "").lower()
+    return any(k in low for k in _LOOKUP)
+
+
+def _is_chitchat(t: str) -> bool:
+    return any(k in t for k in _CHITCHAT) or (
+        len(t) <= _SHORT and any(k in t for k in _CHITCHAT_SHORT))
+
+
 def decide(goal: str) -> Decision:
     """分诊，并说清是靠哪条规则判的。"""
     t = (goal or "").strip()
-    if any(k in t for k in _CHITCHAT):
+    if _is_chitchat(t) and not needs_lookup(t):
         return Decision(DIRECT, "chitchat")
 
     wide = any(k in t for k in _WIDE)
@@ -82,8 +105,9 @@ def route(goal: str) -> str:
 
 _CLASSIFY = """把用户的请求分到三类之一，只回一个词，不要解释。
 
-direct —— 在问助手自己（能做什么、怎么用、你是谁），不需要碰任何文件
-fast   —— 目标具体的活儿：改某个文件、跑个命令、读一个文件
+direct —— 在问助手自己（你能做什么、你怎么用、你是谁）或纯闲聊。
+          **一个工具都不用**就能答完。要联网查资料、要看文件的都不算。
+fast   —— 目标具体的活儿：改某个文件、跑个命令、读一个文件、上网查一件事
 slow   —— 跨多个文件、要先想清楚再动：分析、梳理、对比、审计整个项目
 
 只回 direct、fast、slow 三者之一。"""
@@ -110,5 +134,9 @@ def refine(goal: str, decision: Decision, llm) -> Decision:
     said = (getattr(reply, "content", "") or "").strip().lower()
     for p in (DIRECT, FAST, SLOW):
         if p in said:
+            # 分类器也会把「查资料」当成纯问答，可那要用 web_search，direct 路没有。
+            # 提示词已经说清楚了，这里再挡一道：判进 direct 是最贵的错，值两道防线。
+            if p == DIRECT and needs_lookup(goal):
+                return Decision(FAST, _VETOED)
             return Decision(p, _BY_LLM)
     return decision
