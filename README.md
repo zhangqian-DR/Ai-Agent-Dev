@@ -95,7 +95,7 @@ copy config.example.json config.json
 
 ### 分诊与模型分层
 
-目标进来先过一道**纯关键词**的分诊（`app/agent/router.py`，零 LLM 成本），分成三条路：
+目标进来先过一道**关键词**分诊（`app/agent/router.py`，零 LLM 成本），分成三条路：
 
 | 路径 | 什么样的目标 | 模型 |
 |---|---|---|
@@ -109,6 +109,21 @@ direct 则是让模型没有工具、只能凭空编。因此 `direct` 收得很
 规则不只看关键词，还看**范围**——「恰好点名一个文件」是具体活儿，「所有 / 整个项目」
 或点了两个文件就是跨文件的活。关键词表是先写标注语料、再设计规则定出来的，那份语料
 就是 `tests/test_router.py`。
+
+关键词只认字面，说法一换就失手——而换说法恰恰是真实用户的常态。所以**没命中任何规则时**
+（也只有这时）再用最便宜那档补判一次，命中关键词的零成本快路一个字都不多问。实测：
+
+```
+分类调用     0.27s 中位 / 122 input + 1 output tokens
+8 条换过说法的请求   关键词 3/8 对  →  加上兜底 8/8 对
+```
+
+关键词失手的那 5 条全都落在 `fast`，也就是**失手方向是安全的**——兜底是在这个基础上
+把准确率补回来，不是在替它兜底兜安全。分类失败（网络抖动等）就保留关键词的结果，
+绝不因此打断任务。整个兜底层可以用 `route_fallback: false` 关掉。
+
+每一轮走了哪条路、依据是哪条规则（`chitchat` / `analyze_wide` / `wide` / `llm` / `fallback`…）
+都落在 `sessions` 表里，`/poll` 也一并返回。判错了得有痕迹，否则用户只会觉得"它今天有点笨"。
 
 `direct` 是**真的不绑工具**——不是换个模型而已。没绑工具，模型就算想调 `write_file`
 也调不出来，"回答问题"和"能动手"是物理隔开的。它的系统提示词也另写了一份短的：
@@ -168,7 +183,8 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 `cmd_output_limit` 命令输出 ≤2000 字符、`cmd_timeout` 命令 30 秒超时、
 `max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步、
 `max_memories` 注入提示词的记忆条数 ≤50、`max_verify_rounds` 验收最多重试 2 轮、
-`max_critic_rounds` slow 路的反思最多转 1 轮。
+`max_critic_rounds` slow 路的反思最多转 1 轮、
+`route_fallback` 关键词分诊没命中时补判一次（默认开）。
 
 ## 开发
 
@@ -176,7 +192,7 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-281 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+294 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 其中 32 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着

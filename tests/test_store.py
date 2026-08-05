@@ -171,6 +171,45 @@ def test_memory_columns_added_to_an_old_db(tmp_path):
     assert got[0]["is_negative"] is False
 
 
+# ---------- 分诊依据 ----------
+
+def test_session_records_how_it_was_routed(tmp_path):
+    """判错了得留下痕迹。不然用户只会觉得「它今天有点笨」，而我们连
+    「兜底那层被触发过多少次」都答不上来。"""
+    s = Store(str(tmp_path / "r1.db"))
+    sid = s.create_session("分析一下", path="slow", route_reason="analyze_wide")
+
+    got = s.latest_session()
+    assert got["id"] == sid
+    assert got["path"] == "slow" and got["route_reason"] == "analyze_wide"
+
+
+def test_route_stats_counts_by_reason(tmp_path):
+    """跑一段时间之后要能直接问：各条规则各判了多少次。"""
+    s = Store(str(tmp_path / "r2.db"))
+    for reason in ("chitchat", "fallback", "fallback", "analyze_wide"):
+        s.create_session("x", path="fast", route_reason=reason)
+
+    assert s.route_stats() == {"fallback": 2, "analyze_wide": 1, "chitchat": 1}
+
+
+def test_route_columns_added_to_an_old_db(tmp_path):
+    """老库的 sessions 表没有这两列，补列且不碰已有记录。"""
+    db = tmp_path / "old_sess.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP);""")
+    conn.execute("INSERT INTO sessions(title) VALUES('祖传会话')")
+    conn.commit()
+    conn.close()
+
+    s = Store(str(db))
+    got = s.latest_session()
+    assert got["title"] == "祖传会话"
+    assert got["path"] == "" and got["route_reason"] == ""
+
+
 def test_close_is_safe_while_another_thread_is_writing(tmp_path):
     """连接是 check_same_thread=False 跨线程共享的，却没有锁。
 

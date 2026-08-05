@@ -32,6 +32,7 @@ class Store:
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS sessions(
           id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT,
+          path TEXT DEFAULT '', route_reason TEXT DEFAULT '',
           created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS messages(
           id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER,
@@ -50,6 +51,10 @@ class Store:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(messages)")}
         if "status" not in cols:
             self.conn.execute("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT ''")
+        scols = {r["name"] for r in self.conn.execute("PRAGMA table_info(sessions)")}
+        for col in ("path", "route_reason"):
+            if col not in scols:
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT ''")
         mcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(memory)")}
         if "is_negative" not in mcols:
             self.conn.execute("ALTER TABLE memory ADD COLUMN is_negative INTEGER DEFAULT 0")
@@ -68,11 +73,13 @@ class Store:
             self._closed = True
             self.conn.close()
 
-    def create_session(self, title: str) -> int:
+    def create_session(self, title: str, path: str = "", route_reason: str = "") -> int:
         with self._lock:
             if self._closed:
                 return 0
-            cur = self.conn.execute("INSERT INTO sessions(title) VALUES(?)", (title,))
+            cur = self.conn.execute(
+                "INSERT INTO sessions(title, path, route_reason) VALUES(?,?,?)",
+                (title, path, route_reason))
             self.conn.commit()
             return cur.lastrowid
 
@@ -82,8 +89,24 @@ class Store:
             if self._closed:
                 return {}
             r = self.conn.execute(
-                "SELECT id,title,created_at FROM sessions ORDER BY id DESC LIMIT 1").fetchone()
+                "SELECT id,title,path,route_reason,created_at FROM sessions"
+                " ORDER BY id DESC LIMIT 1").fetchone()
             return dict(r) if r else {}
+
+    def route_stats(self) -> dict:
+        """各条分诊规则各判了多少次。
+
+        存在的意义是回答「兜底那层被触发多少次」——不知道这个比例，换嵌入路由
+        也好、调关键词表也好，都还是拍脑袋。
+        """
+        with self._lock:
+            if self._closed:
+                return {}
+            rows = self.conn.execute(
+                "SELECT route_reason, COUNT(*) n FROM sessions"
+                " WHERE route_reason != '' GROUP BY route_reason"
+                " ORDER BY n DESC").fetchall()
+            return {r["route_reason"]: r["n"] for r in rows}
 
     def add_message(self, session_id, role, content, tool_calls="", tool_results="", status=""):
         with self._lock:

@@ -42,6 +42,9 @@ class Config:
     # slow 路的反思回环最多转几次。评审本身要花一次模型调用，而模型调用占了
     # 一轮任务 95% 以上的时间，所以默认只给一次。
     max_critic_rounds: int = 1
+    # 关键词分诊没命中时，用最便宜那档补判一次（约 0.27s / 122 tokens）。
+    # 只在没命中时触发——命中关键词的快路仍然是零成本的。
+    route_fallback: bool = True
 
     def model_for(self, path: str) -> str:
         """按路径挑模型。fast 就是 model 本身，认不出的档也退回它。"""
@@ -95,4 +98,5 @@ def load_config(path: str = "config.json") -> Config:
         model_direct=raw.get("model_direct", ""),
         model_slow=raw.get("model_slow", ""),
         max_critic_rounds=_int("max_critic_rounds"),
+        route_fallback=bool(raw.get("route_fallback", True)),
     )

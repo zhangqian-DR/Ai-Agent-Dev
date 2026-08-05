@@ -74,7 +74,9 @@ def _db(tmp_path):
 
 def _app(tmp_path, llm):
     db = _db(tmp_path)
-    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    # 默认关掉兜底分类：它会多走一次 chat()，而这里的假模型是按调用次数返回
+    # 脚本的，多一次就全错位了。兜底本身有专门的测试。
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db, route_fallback=False)
     return create_app(cfg, llm=llm, store=Store(str(db)), provider=FakeProvider())
 
 
@@ -241,6 +243,71 @@ def test_direct_path_binds_no_tools(tmp_path):
     assert client.get("/poll").json()["path"] == "direct"
     assert seen == [[]], f"direct 路绑了工具：{seen}"
     assert any(e["type"] == "final" and "本地助手" in e["content"] for e in events)
+
+
+def test_route_decision_is_recorded(tmp_path):
+    """分诊依据要落库——判错了才有痕迹，也才能统计兜底层被触发多少次。"""
+    db = _db(tmp_path)
+    store = Store(str(db))
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    client = TestClient(create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider()))
+
+    client.post("/send", json={"goal": "分析这个项目所有会写盘的地方"})
+    _drain(client)
+
+    s = store.latest_session()
+    assert s["path"] == "slow" and s["route_reason"] == "analyze_wide"
+    assert store.route_stats() == {"analyze_wide": 1}
+
+
+def test_keyword_miss_falls_back_to_the_classifier(tmp_path):
+    """关键词不命中时补判一次；命中的快路一次都不该多问。"""
+    asked = []
+
+    class Spy:
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, m, t):
+            self.n += 1
+            if t == [] and len(m) == 2 and "只回一个词" in m[0].content:
+                asked.append(m[1].content)
+                return AIMessage(content="slow")
+            return AIMessage(content="做完了")
+
+    db = _db(tmp_path)
+    store = Store(str(db))
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db)
+    client = TestClient(create_app(cfg, llm=Spy(), store=store, provider=FakeProvider()))
+
+    client.post("/send", json={"goal": "帮我把这堆代码理一理"})   # 关键词失手
+    _drain(client)
+
+    assert asked, "关键词没命中却没去问分类器"
+    assert store.latest_session()["route_reason"] == "llm"
+    assert client.get("/poll").json()["path"] == "slow"
+
+
+def test_fallback_can_be_turned_off(tmp_path):
+    """它多花一次调用，得留个开关。"""
+    class Spy:
+        def __init__(self):
+            self.classify = 0
+
+        def chat(self, m, t):
+            if t == [] and len(m) == 2 and "只回一个词" in m[0].content:
+                self.classify += 1
+            return AIMessage(content="做完了")
+
+    db = _db(tmp_path)
+    llm = Spy()
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=db, route_fallback=False)
+    client = TestClient(create_app(cfg, llm=llm, store=Store(str(db)), provider=FakeProvider()))
+
+    client.post("/send", json={"goal": "帮我把这堆代码理一理"})
+    _drain(client)
+
+    assert llm.classify == 0
 
 
 def test_poll_exposes_the_routed_path_and_model(tmp_path):
@@ -483,7 +550,8 @@ def test_history_keeps_plan_progress(tmp_path):
 def test_history_endpoint_replays_last_session(tmp_path):
     """关掉页面再打开要能看回上一轮做了什么，否则聊天记录等于没存。"""
     store = Store(str(tmp_path.parent / "r.db"))
-    cfg = Config("", "", "qwen-plus", tmp_path, db_path=tmp_path.parent / "r.db")
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=tmp_path.parent / "r.db",
+                 route_fallback=False)
     client = TestClient(create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider()))
     client.post("/send", json={"goal": "看看目录"})
     _drain(client)
@@ -498,7 +566,8 @@ def test_history_endpoint_replays_last_session(tmp_path):
 
 def test_history_records_tool_name(tmp_path):
     store = Store(str(tmp_path.parent / "r2.db"))
-    cfg = Config("", "", "qwen-plus", tmp_path, db_path=tmp_path.parent / "r2.db")
+    cfg = Config("", "", "qwen-plus", tmp_path, db_path=tmp_path.parent / "r2.db",
+                 route_fallback=False)
     client = TestClient(create_app(cfg, llm=ListDirLLM(), store=store, provider=FakeProvider()))
     client.post("/send", json={"goal": "看看目录"})
     _drain(client)

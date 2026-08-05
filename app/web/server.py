@@ -14,7 +14,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.agent.direct import DirectRunner
 from app.agent.loop import AgentRunner
-from app.agent.router import route
+from app.agent.router import decide, refine
 from app.llm.client import LLMClient
 from app.store.db import Store
 from app.tools.registry import build_tools
@@ -45,6 +45,7 @@ class Session:
         self.driving = False
         self.session_id = None
         self.path = ""                       # 这一轮分诊到哪条路
+        self.reason = ""                     # 以及是靠哪条规则判的
         self.model = ""                      # 以及实际用的哪档模型
         self.runner = None                   # AgentRunner，start 与 resume 共用同一个
         self._lock = threading.Lock()
@@ -182,11 +183,15 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
         sess.plan_current = 0
         sess.pending = None
         sess.take_wheel()
-        # 分诊：纯关键词，零 LLM 成本。目前 fast 与 slow 走的是同一套 ReAct，
-        # 区别只在用哪档模型——规划+反思那条路是后面的阶段。
-        sess.path = route(goal)
+        # 分诊：纯关键词，零 LLM 成本。没命中时才用最便宜那档补判一次——
+        # 关键词只看字面，说法一换就失手，而那恰恰是真实用户的常态。
+        d = decide(goal)
+        if cfg.route_fallback:
+            d = refine(goal, d, llms["direct"])
+        sess.path, sess.reason = d.path, d.reason
         sess.model = cfg.model_for(sess.path)
-        sess.session_id = store.create_session(goal[:40] or "未命名会话")
+        sess.session_id = store.create_session(goal[:40] or "未命名会话",
+                                               path=d.path, route_reason=d.reason)
         store.add_message(sess.session_id, "user", goal)
         # ToolSet 与 runner 整轮共用：plan/plan_current 挂在 ToolSet 上，
         # 每次恢复都新建的话计划面板会在确认之后凭空清空。
@@ -215,6 +220,7 @@ def create_app(cfg, llm=None, store=None, provider=None) -> FastAPI:
             "work_dir": str(cfg.work_dir),
             # 分诊结果要看得见——路由判错了不暴露的话，用户只会觉得"它今天有点笨"
             "path": sess.path,
+            "route_reason": sess.reason,
             "model": sess.model or cfg.model,
             "max_steps": cfg.max_steps,
         }
