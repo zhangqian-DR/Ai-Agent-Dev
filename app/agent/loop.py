@@ -35,6 +35,11 @@ _ARG_VALUE_LIMIT = 200
 # 同一工具 + 同一参数 + 同一结果 出现几次时提醒 / 终止
 _REPEAT_NUDGE = 2
 _REPEAT_ABORT = 3
+# 同一个工具连着用几次就提醒换个办法（参数可以不同）。上面两把尺子都要求参数
+# 相同，看不见「换着关键词反复 grep」这种原地转——真机上出现过连着 17 次
+# search_in_files、一个文件没读就烧完步数。只提醒不终止：连读几个文件是正当的，
+# 阈值取 6 是留出这个余地。
+_SAME_TOOL_NUDGE = 6
 
 
 class AgentState(TypedDict):
@@ -46,10 +51,14 @@ class AgentState(TypedDict):
     counts: dict
     last_sig: Optional[str]
     consecutive: int
+    last_tool: Optional[str]
+    same_tool: int
     # 这一轮有没有真的动过东西（写文件、跑非只读命令）。只有动过才值得验收。
     touched: bool
     verify_rounds: int
     verify_passed: bool
+    critic_rounds: int
+    draft: Optional[str]        # synth 写好、还没过评审的结论
     # 非 None 就是收场了：熔断终止、模型层出错、或验收给出的结论
     final: Optional[str]
 
@@ -93,6 +102,12 @@ _SYNTH_ASK = ("以上是完整的执行过程。现在把结论完整地写给�
               "全部材料，不要只总结最后几步；有没做到或没验证的地方要如实说明。"
               "不要再调用任何工具。")
 
+_CRITIC_ASK = (
+    "请评审上面这份结论是否可以交付。\n\n{facts}\n\n"
+    "只看两件事：结论有没有跳过用户真正要的东西；有没有拿没看过的材料下断言。\n"
+    "可以交付就**只回**「通过」两个字；否则写「不合格：」加上具体缺了什么，"
+    "要能照着补。不要重写结论本身。")
+
 
 def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
     """把节点接成图。所有外部依赖靠闭包带进去，节点本身只读写 state。
@@ -104,6 +119,15 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
     is_slow = path == "slow"
     # slow 路的收尾归 synth，fast 路直接结束
     terminal = "synth" if is_slow else END
+
+    def critic_due(state: AgentState) -> bool:
+        """要不要起 LLM 评审。
+
+        配了 verify_cmd 就不起——机器判据比模型评自己可靠，那条路已经由 verify
+        节点管着，两个判官并存只会互相打架。
+        """
+        return (is_slow and not cfg.verify_cmd
+                and state["critic_rounds"] < cfg.max_critic_rounds)
 
     def verify_due(state: AgentState) -> bool:
         """这一轮该不该跑验收命令。
@@ -192,13 +216,70 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
             emit({"type": "final", "content": msg, "ok": False})
             return {"final": msg}
         answer = reply.content or ""
+        if critic_due(state):                # 后面还有评审，先别收场
+            return {"messages": [reply], "draft": answer}
         emit({"type": "final", "content": answer, "ok": True})
         return {"messages": [reply], "final": answer}
+
+    def _read_facts(state: AgentState) -> str:
+        """给评审的**机器事实**。
+
+        光问模型「你答得全不全」，它多半说全。所以把查得到的摆出来：读过哪些
+        文件、工作目录里还剩哪些没读过。有没有必要读是它判断，但不能假装不知道。
+        """
+        read = []
+        for m in state["messages"]:
+            for tc in (getattr(m, "tool_calls", None) or []):
+                if tc.get("name") in ("read_file", "search_in_files"):
+                    v = (tc.get("args") or {}).get("path")
+                    if v and v not in read:
+                        read.append(v)
+        try:
+            names = sorted(p.name for p in cfg.work_dir.iterdir() if p.is_file())
+        except OSError:
+            names = []
+        unread = [n for n in names if not any(n in r for r in read)]
+        return (f"事实（机器统计，不是模型自述）：\n"
+                f"- 这一轮读过：{'、'.join(read) or '（没读过任何文件）'}\n"
+                f"- 工作目录里没读过的：{'、'.join(unread) or '（没有）'}")
+
+    def critic_node(state: AgentState) -> dict:
+        """评一次，不合格就带着意见回去补。
+
+        配了 verify_cmd 的项目走不到这里——测试绿不绿是客观的，比让模型评自己
+        可靠得多，那条路由 verify 节点管着。这里只兜没有机器判据的场景。
+        """
+        rounds = state["critic_rounds"] + 1
+        draft = state["draft"] or ""
+        msgs = trim_history(state["messages"], max_chars=_SYNTH_CHARS) + [
+            HumanMessage(content=_CRITIC_ASK.format(facts=_read_facts(state)))]
+        try:
+            reply = llm.chat(msgs, [])
+        except Exception as e:               # 评审挂了不该连累已经写好的结论
+            emit({"type": "final", "content": draft, "ok": True})
+            return {"critic_rounds": rounds, "final": draft}
+
+        verdict = (reply.content or "").strip()
+        passed = verdict.startswith("通过") or "不合格" not in verdict
+        emit({"type": "tool", "name": "评审", "result": verdict,
+              "ok": passed, "badge": "通过" if passed else "不合格"})
+        if passed:
+            emit({"type": "final", "content": draft, "ok": True})
+            return {"critic_rounds": rounds, "final": draft}
+        if rounds >= cfg.max_critic_rounds:
+            msg = f"{draft}\n\n⚠️ 评审未通过：{verdict}"
+            emit({"type": "final", "content": msg, "ok": False})
+            return {"critic_rounds": rounds, "final": msg}
+        back = HumanMessage(content=f"评审意见：{verdict}\n\n照着补齐，再重新给结论。")
+        # 和验收闸同理：拿到新意见后回头重查不是原地打转，把熔断两本账清零
+        return {"messages": [back], "critic_rounds": rounds,
+                "counts": {}, "last_sig": None, "consecutive": 0}
 
     def tools_node(state: AgentState) -> dict:
         reply = state["messages"][-1]
         counts = dict(state["counts"])
         last_sig, consecutive = state["last_sig"], state["consecutive"]
+        last_tool, same_tool = state["last_tool"], state["same_tool"]
         plan, plan_current = state["plan"], state["plan_current"]
         touched = state["touched"]
         out: list[Any] = []
@@ -262,6 +343,13 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
                 result += ("\n\n[系统提示] 这个操作你已经执行过一次，没有任何进展。"
                            "不要再重复，先分析失败原因，换一种方法。")
 
+            same_tool = same_tool + 1 if name == last_tool else 1
+            last_tool = name
+            if same_tool == _SAME_TOOL_NUDGE:
+                result += (f"\n\n[系统提示] 你已经连着用了 {same_tool} 次 {name}，"
+                           f"一直没有换过工具。换一种办法——比如直接读文件、"
+                           f"或者根据已有信息先给出阶段性结论。")
+
             if name == "update_plan":
                 plan, plan_current = tools.plan, tools.plan_current
                 emit({"type": "plan", "steps": plan, "current": plan_current})
@@ -274,7 +362,7 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
         _shrink_tool_args(reply)
         return {"messages": [reply, *out], "counts": counts, "last_sig": last_sig,
                 "consecutive": consecutive, "plan": plan, "plan_current": plan_current,
-                "touched": touched}
+                "touched": touched, "last_tool": last_tool, "same_tool": same_tool}
 
     def verify_node(state: AgentState) -> dict:
         """模型说完成了，跑一遍验收命令看它说得对不对。
@@ -331,6 +419,12 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
     def after_planner(state: AgentState) -> str:
         return END if state["final"] is not None else "agent"
 
+    def after_synth(state: AgentState) -> str:
+        return END if state["final"] is not None else "critic"
+
+    def after_critic(state: AgentState) -> str:
+        return END if state["final"] is not None else "agent"
+
     def after_tools(state: AgentState) -> str:
         return END if state["final"] is not None else "agent"
 
@@ -348,9 +442,11 @@ def build_graph(*, llm, tools, cfg, emit, checkpointer, path: str = "fast"):
     if is_slow:
         g.add_node("planner", planner_node)
         g.add_node("synth", synth_node)
+        g.add_node("critic", critic_node)
         g.add_edge(START, "planner")
         g.add_conditional_edges("planner", after_planner, {"agent": "agent", END: END})
-        g.add_edge("synth", END)
+        g.add_conditional_edges("synth", after_synth, {"critic": "critic", END: END})
+        g.add_conditional_edges("critic", after_critic, {"agent": "agent", END: END})
     else:
         g.add_edge(START, "agent")
     return g.compile(checkpointer=checkpointer)
@@ -383,8 +479,9 @@ class AgentRunner:
                          HumanMessage(content=goal)],
             "step": 0, "plan": [], "plan_current": 0,
             "counts": {}, "last_sig": None, "consecutive": 0,
+            "last_tool": None, "same_tool": 0,
             "touched": False, "verify_rounds": 0, "verify_passed": False,
-            "final": None,
+            "critic_rounds": 0, "draft": None, "final": None,
         }
         return self._drive(init, thread_id)
 

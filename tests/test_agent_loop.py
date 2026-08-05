@@ -430,6 +430,38 @@ def test_max_steps_gives_a_clean_ending(tmp_path):
         "max_steps 仍应表示「最多几轮模型调用」"
 
 
+def test_same_tool_over_and_over_gets_nudged(tmp_path):
+    """同一个工具反复变着参数用，两把尺子都看不见——它们都要求参数相同。
+
+    真机上撞到过：让它分析安全问题，它连着 17 次 search_in_files（每次换个关键词），
+    一个文件都没读，直接烧到步数上限、最后只吐出「已达最大步数」。这不是死循环，
+    是**换着姿势原地转**，得单独有把尺子量。
+    """
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    seq = [_call("search_in_files", {"pattern": f"关键词{i}"}, cid=str(i))
+           for i in range(10)] + [_done("好了")]
+    llm = ScriptLLM(*seq)
+
+    _, events = _run(tmp_path, llm)
+
+    nudged = [e for e in events
+              if e["type"] == "tool" and "换一种" in (e.get("result") or "")]
+    assert nudged, "连着十次同一个工具都没被提醒"
+    assert "search_in_files" in nudged[0]["result"]
+
+
+def test_reading_several_files_in_a_row_is_fine(tmp_path):
+    """但连读几个文件是正当的——阈值不能低到把正常干活也拦了。"""
+    for i in range(4):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+    seq = [_call("read_file", {"path": f"f{i}.txt"}, cid=str(i)) for i in range(4)] + [_done()]
+
+    _, events = _run(tmp_path, ScriptLLM(*seq))
+
+    assert not [e for e in events
+                if e["type"] == "tool" and "换一种" in (e.get("result") or "")]
+
+
 def test_different_results_do_not_trip_breaker(tmp_path):
     """结果每次都不同 = agent 在推进，不该被熔断误杀。"""
     (tmp_path / "log.txt").write_text("start\n", encoding="utf-8")
