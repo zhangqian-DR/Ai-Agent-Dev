@@ -182,8 +182,9 @@ sequenceDiagram
 </section>
 
 <section>
-  <h2><span class="num">03</span>图的三个节点<span class="src">agent/loop.py build_graph</span></h2>
-  <p><code>recursion_limit</code> 等于 <code>max_steps × 2</code>——它数的是<b>节点执行次数</b>，一个 ReAct 回合是 agent 加 tools 两个节点。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
+  <h2><span class="num">03</span>图的三个节点（fast 路）<span class="src">agent/loop.py build_graph</span></h2>
+  <p>这张画的是 <b>fast</b> 那条路。slow 在它两头各加了 planner 与 synth、再接一道 critic，中间这段执行是同一段代码——见<b>图 06</b>。<br/>
+  <code>recursion_limit</code> 等于 <code>max_steps × 2</code>——它数的是<b>节点执行次数</b>，一个 ReAct 回合是 agent 加 tools 两个节点。三处护栏的位置：裁剪在<b>请求前</b>，熔断在<b>工具执行后</b>，参数压缩在<b>整批工具跑完后</b>。</p>
   <div class="plate">
 <pre class="mermaid">
 flowchart TD
@@ -304,6 +305,55 @@ flowchart TD
 <code>badge</code> 是可选的：验收闸失败该说"未通过"而不是复用"已拒绝"。颜色仍按 <code>ok</code> 走，只有措辞由发事件的一方决定。</div>
 </section>
 
+<section>
+  <h2><span class="num">06</span>三路分诊<span class="src">agent/router.py + loop.py build_graph</span></h2>
+  <p>目标进来先过一道<b>纯关键词</b>的分诊（零 LLM 成本），分到三条路。<b>前面 01~05 画的都是 fast 那条</b>——slow 只是在它两头各加了节点，中间那段执行是<b>同一段代码</b>，所以确认闸、熔断、验收闸三道在 slow 路上照样生效，不必重接一遍。</p>
+  <div class="plate">
+<pre class="mermaid">
+flowchart TD
+  IN([用户目标]) --> R{"route 纯关键词<br/>零 LLM 成本"}
+
+  R -->|元问题 或 闲聊| D1["direct 一次问答<br/>tools 传空列表<br/>提示词里一个工具名都不提"]
+  D1 --> DEND([END])
+
+  R -->|目标具体的活儿| F1["fast 就是图 03 那个环<br/>agent ⇄ tools"]
+  F1 --> FV{"该验收"}
+  FV -->|是| FVN["verify"]
+  FV -->|否| FEND([END])
+  FVN --> FEND
+
+  R -->|跨文件 或 要先想清楚| P
+
+  subgraph SLOW["slow —— 两头各加一个节点，中间复用同一段执行"]
+    P["planner<br/>只绑 update_plan<br/>出 2~4 条调查提纲"] --> E["agent ⇄ tools<br/>与 fast 完全同一段代码"]
+    E --> V{"该验收"}
+    V -->|是| VN["verify"]
+    V -->|否| SY
+    VN --> SY["synth<br/>60000 字符窗口通读全程<br/>不绑工具"]
+    SY --> C{"critic<br/>配了 verify_cmd 就不起"}
+    C -->|不合格 且还有轮数| E
+    C -->|轮数用尽| SBAD["final 带 评审未通过<br/>ok=false"]
+  end
+
+  C -->|通过| SEND([END])
+  SBAD --> SEND
+
+  classDef cheap fill:#e9f4ed,stroke:#4d9a6c,color:#173423
+  classDef guard fill:#fdf1e0,stroke:#c79245,color:#3a2a12
+  classDef stop fill:#fbeceb,stroke:#c76a60,color:#3d1a17
+  class D1 cheap
+  class P,SY,C,VN,FVN guard
+  class SBAD stop
+</pre>
+  </div>
+  <div class="read">
+    <b>读法：</b>判错的代价<b>不对称</b>，所以规则往上偏——把闲聊判成 fast 只是多花点 token，把真任务判成 direct 则是让模型没有工具、只能凭空编。因此 <code>direct</code> 收得很窄，认不出来的一律走 <code>fast</code>。<br/>
+    绿色那条是最省的：<code>tools</code> 传空列表不只是省 token（实测一次「你能做什么」input_tokens 从 1131 降到 142），更是<b>把「回答问题」和「能动手」物理隔开</b>——绑不上工具，模型就算想写文件也写不出来。<br/>
+    <code>critic</code> 只在<b>没有机器判据</b>时才起：配了 <code>verify_cmd</code> 的项目，测试绿不绿是客观的，比让模型评自己可靠，那条路由 <code>verify</code> 管着；两个判官并存只会互相打架。<br/>
+    <b>执行没有并行，而且大概率会一直串行。</b>实测一轮 slow 任务里模型调用占 95.9%、工具执行占 0.1%，把工具改成理想并行最多省总时长的 0.1%。
+  </div>
+</section>
+
 <div class="gap">
   <h3>这几张图和设计文档差在哪</h3>
   <ul>
@@ -311,6 +361,7 @@ flowchart TD
     <li><b>确认闸的语义在文档里完全看不出来。</b>§9 只说"后端进入待确认状态"，没说清停在哪、谁在等谁。这是图 02 存在的理由——而它的答案已经变了一次：早期是 agent 线程阻塞在 <code>threading.Event.wait()</code> 上，现在是图存 checkpoint 后返回、<b>根本没有线程在等</b>。</li>
     <li><b>反思现在有两处是硬的了。</b>文档把"出错→反思→重试"画成一个环，但早期代码里没有对应分支——它靠的是把错误字符串喂回历史 + system prompt 第 3 条，模型自己决定要不要换方法。现在图 03 里有两处是流程强制的：熔断的"追加系统提示"，以及 verify 节点把验收失败喂回去。后者更接近文档想画的那个环，只是判据是<b>机器</b>给的（测试绿不绿），不是模型自评。</li>
     <li><b>文档完全没有 LangGraph。</b>它写的是手写 for 循环。现在循环由 <code>StateGraph</code> 驱动、确认闸由 <code>interrupt</code> 加 <code>SqliteSaver</code> 实现，这几张图是<b>以代码为准</b>重画的。</li>
+    <li><b>文档里只有一条执行路径。</b>现在是三条（图 06）：<code>direct</code> 直答不绑工具、<code>fast</code> 是原有的 ReAct、<code>slow</code> 走规划-汇总-反思。文档 §3 那个"规划 → 执行 → 反思"的环，现在只在 <code>slow</code> 这一条上成立，而且判据优先用机器的（测试绿不绿）而不是模型自评。</li>
   </ul>
 </div>
 

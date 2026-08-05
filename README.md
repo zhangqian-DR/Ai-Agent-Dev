@@ -218,7 +218,8 @@ pydantic 参数模型自动生成。**没有用预制的 `ToolNode`**——工�
 diff，没有注册成工具，模型看不到它。
 
 **流程图**：[`docs/流程图.html`](docs/流程图.html) —— 分层依赖、任务时序（确认闸为什么不占线程）、
-图的三个节点（agent / tools / verify）、安全阀判定树、事件类型对照。用浏览器打开，
+fast 路的三个节点（agent / tools / verify）、安全阀判定树、事件类型对照、三路分诊
+（direct / fast / slow 与 slow 那条上的 planner→synth→critic）。用浏览器打开，
 图表需要联网加载一次 mermaid；加载不出来时会原样显示图表源码。
 
 改代码后记得同步这里。**同步完用 mermaid 自己的解析器过一遍**——语法错在浏览器里
