@@ -124,6 +124,13 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 一个工具，规划那步不该让模型顺手动起手来），结尾 **synth** 用大得多的窗口通读全程再写
 结论——执行阶段每次调用都要按预算裁剪，长任务的收尾那句常常只看得见最近几步。
 
+写完结论还要过一道 **critic**：不合格就带着**具体意见**回去补，最多 `max_critic_rounds`
+轮（默认 1）。评审拿到的不只是结论，还有**机器统计的事实**——这一轮读过哪些文件、
+工作目录里还有哪些没读过。光问模型"你答得全不全"它多半说全。
+
+> **配了 `verify_cmd` 就不起 LLM 评审**：测试绿不绿是客观的，比让模型评自己可靠，
+> 那条路已经由验收闸管着。两个判官并存只会互相打架。
+
 中间的执行完全复用 `agent ⇄ tools`，所以确认闸、熔断、验收闸三道全都自动生效。
 
 **执行是串行的，而且大概率会一直串行。**实测一轮 slow 分析任务：模型调用 13 次共
@@ -160,7 +167,8 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 `max_file_bytes` 单文件 >1MB 拒读、`read_output_limit` 返回给模型的内容 ≤8000 字符、
 `cmd_output_limit` 命令输出 ≤2000 字符、`cmd_timeout` 命令 30 秒超时、
 `max_write_chars` 单次写入 ≤64000 字符、`max_steps` 最多 20 步、
-`max_memories` 注入提示词的记忆条数 ≤50、`max_verify_rounds` 验收最多重试 2 轮。
+`max_memories` 注入提示词的记忆条数 ≤50、`max_verify_rounds` 验收最多重试 2 轮、
+`max_critic_rounds` slow 路的反思最多转 1 轮。
 
 ## 开发
 
@@ -168,7 +176,7 @@ input_tokens 1131 → 142   （完整提示词 + 8 工具 + plus  →  短提示
 .venv\Scripts\python.exe -m pytest -v
 ```
 
-273 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
+281 个测试，不联网、不需要 api_key（模型层用假的 chat model，agent 循环用脚本化的 FakeLLM）。
 
 其中 32 个是**页面逻辑**的检查（`tests/frontend_checks.js`）：把 `index.html` 里的
 `<script>` 抠出来，配一套最小 DOM 假件直接跑，不装任何 JS 依赖。装了 node 就跟着

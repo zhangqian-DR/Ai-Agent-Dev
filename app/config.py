@@ -39,6 +39,9 @@ class Config:
     # direct 不绑工具，用便宜的档就够（工具调用不稳的模型在这里也无所谓）。
     model_direct: str = ""
     model_slow: str = ""
+    # slow 路的反思回环最多转几次。评审本身要花一次模型调用，而模型调用占了
+    # 一轮任务 95% 以上的时间，所以默认只给一次。
+    max_critic_rounds: int = 1
 
     def model_for(self, path: str) -> str:
         """按路径挑模型。fast 就是 model 本身，认不出的档也退回它。"""
@@ -91,4 +94,5 @@ def load_config(path: str = "config.json") -> Config:
         max_verify_rounds=_int("max_verify_rounds"),
         model_direct=raw.get("model_direct", ""),
         model_slow=raw.get("model_slow", ""),
+        max_critic_rounds=_int("max_critic_rounds"),
     )
